@@ -1,0 +1,16 @@
+
+Installing mysqlsla
+===================
+
+   perl Makefile.PL
+   make
+   make install
+
+Depending on your system, the mysqlsla script will be copied to some common bin
+directory (/usr/local/bin/ for example). Then you should be able to run it from
+the command line like: mysqlsla -lt slow LOG
+
+For quick help, man mysqlsla
+
+For all documentation and guides, visit http://hackmysql.com/mysqlsla
+

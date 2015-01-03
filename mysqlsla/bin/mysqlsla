@@ -1,0 +1,3617 @@
+#!/usr/bin/perl -w
+# DEVEL
+# There are 3 packages in this file, in this order:
+#    1. (MySQL::Log::)ParseFilter
+#    2. ReportFormats
+#    3. mysqlsla
+
+###############################################################################
+# (MySQL::Log::)ParseFilter                                                   #
+###############################################################################
+
+# This is an internalized version of MySQL::Log::ParseFilter
+# http://hackmysql.com/mlp
+# http://search.cpan.org/~dnichter/
+
+package ParseFilter;
+
+use 5.008;
+use strict;
+use warnings;
+
+our $VERSION = '1.01';
+
+# Module options and their defaults
+my $save_meta_values   = 1;
+my $save_all_values    = 0;
+my $abstract_in        = 0;
+my $abstract_values    = 0;
+my $atomic_statements  = 0;
+my $db_inheritance     = 0;
+my $grep               = '';
+
+# Internal vars for hackers
+my %uf                 = ();  # udl format
+my %mf                 = ();  # meta filters
+my %sf                 = ();  # statement-filter
+my $statement_id       = 1;   # I don't know if this is helpful yet; don't use it
+my $debug              = 0;
+my $debug_filehandles  = ();  # Not tested; don't use it either
+
+
+#
+# Subs to get refs to internal vars exported as :hacks
+#
+sub get_meta_filter      { return \%mf; }
+sub get_statement_filter { return \%sf; }
+
+#
+# Subs to set module options exported as :options
+# 
+sub set_save_meta_values    { $save_meta_values = shift;  }
+sub set_save_all_values     { $save_all_values  = shift;  }
+sub set_IN_abstraction      { $abstract_in = shift;       }
+sub set_VALUES_abstraction  { $abstract_values  = shift;  }
+sub set_atomic_statements   { $atomic_statements = shift; }
+sub set_db_inheritance      { $db_inheritance = shift;    }
+
+#
+# All subs exported by default
+#
+sub set_grep { $grep = shift; }
+
+sub set_meta_filter
+{
+   # Meta filter format: [condition],[condtion],etc.
+   # [condition] = [meta][op][val]
+   # [meta]      = a meta-property name (cid, t, db, etc.)
+   # [op]        = > < or = (only = for string [val]s)
+   # [val]       = number or string depending on [meta]
+
+   my $filter_string = shift;
+
+   my @filters;
+   my $c;  # condition
+
+   _d("set_meta_filter: filter_string '$filter_string'\n") if $debug;
+
+   @filters = split ',', $filter_string;
+
+   foreach $c (@filters)
+   {
+      if($c =~ /(\w+)([<=>])([\w\.\@]+)/)
+      {
+         push @{$mf{lc($1)}}, [$2, $3];
+      }
+      else
+      {
+         _d("set_meta_filter: bad mf: $c\n") if $debug;
+      }
+   }
+}
+
+sub set_statement_filter
+{
+   # SQL statement filter format: [+-][TYPE],[TYPE],etc.
+   # [+-]   =  positive filter: only SQL statements which *are* TYPE 
+   #           or negative filter: only: SQL statements which are *not* TYPE
+   # [TYPE] =  any SQL statement type (SELECT, UPDATE, DO, etc.)
+   # No space between [+-] and first [TYPE]; defeault is negative filter
+
+   my $filter_string = shift;
+
+   my $pos_neg;
+   my $types;
+
+   _d("set_statement_filter: filter_string '$filter_string'\n") if $debug;
+
+   ($pos_neg, $types) = $filter_string =~ /^([+-]?)(.+)/;
+
+   %sf = map { lc($_) => 0; } split ',', $types;
+
+   $sf{pos_neg} = ($pos_neg && $pos_neg eq '+' ? 1 : 0);
+}
+
+sub set_udl_format
+{
+   _d("set_udl_format\n") if $debug;
+
+   my $udl_format_file = shift;
+
+   my $header;
+   my @metas;
+   my $meta_name;
+   my $meta_type;
+   my $x;
+   my $line;
+
+   if(! open UDLF, "< $udl_format_file")
+   {
+      _d("Cannot open user-defined log format file '$udl_format_file': $!\n") if $debug;
+      return;
+   }
+
+   $uf{rs} = <UDLF>;  # First line of uf should be the record seperator
+   chomp $uf{rs};
+   _d("set_udl_format: record separator literal: '$uf{rs}'\n") if $debug;
+   $uf{rs} =~ s/\\n/\n/g;  # change literal \n to actual newline
+   $uf{rs} =~ s/\\t/\t/g;  # change literal \t to actual tab
+   _d("set_udl_format: record separator escaped: '$uf{rs}'\n") if $debug;
+
+   $header = 1;
+
+   while($line = <UDLF>)
+   {
+      chomp $line;
+
+      if($header)
+      {
+         _d("set_udl_format: header: $line\n") if $debug;
+         push @{$uf{headers}}, $line;
+      }
+      else
+      {
+         _d("set_udl_format: metas: $line\n") if $debug;
+         @metas = split ' ', $line;
+         
+         foreach $x (@metas)
+         {
+            ($meta_name, $meta_type) = ($x =~ /(\w+):(\w{1,2})/);
+            
+            if($meta_type eq 's' || $meta_type eq 'n')
+            {
+               # how to save meta in %q_h after log processing in parse_udl_logs()
+               $uf{meta_saves}->{$meta_name} = 'i';  # i means "initial" value only (save once)
+            }
+            elsif($meta_type eq 'u')
+            {
+               $uf{meta_saves}->{$meta_name} = 'u';  # special case for user meta
+            }
+            elsif($meta_type eq 'na' || $meta_type eq 'nf')
+            {
+               $uf{meta_saves}->{$meta_name} = $meta_type;
+
+               $meta_type = 'n';  # needs to be just n for passes_meta_filter() when set in
+                                  # $uf{meta_types}->{$meta_name} = $meta_type below
+            }
+            else
+            {
+               _d("set_udl_format: bad meta type: $x\n") if $debug;
+               next;
+            }
+
+            $uf{meta_types}->{$meta_name} = $meta_type;
+            push @{$uf{meta_names}}, $meta_name;
+         }
+      }
+
+      $header = !$header;  # flip-flop between header/format
+   }
+
+   close UDLF;
+}
+
+sub parse_binary_logs
+{
+   my %params = @_;  # hash of params
+
+   my $logs;         # ref to array with log file names
+   my $q_h;          # ref to queries hash
+   my $q_a;          # ref to array in which to save all statments (optional)
+   my $stmt;         # statements from log (1 or more)--filtered by check_stmt()
+   my $valid_stmt;   # if stmt is valid (passes all filters)
+   my $q;            # becomes abstracted form of $stmt
+   my $x;            # becomes ref to $q_h{$q}
+   my $use_db;       # db from USE db; statment
+   my $line;         # buffer for processing lines from logs
+   my $log;          # current log file name
+   my $sid;          # meta-property: server_id
+   my $cid;          # meta-property: thread_id (a.k.a. connection id)
+   my $ext;          # meta-property: exec_time
+   my $err;          # meta-property: error_code
+
+   # Set local vars to params for brevity ($$q_h is nicer than $$params{queries})
+   $logs = $params{logs};
+   $q_h  = $params{queries};
+   $q_a  = (exists $params{all_queries} ? $params{all_queries} : 0);
+
+   _d("parse_binary_logs: q_a $q_a\n") if $debug;
+
+   local $/ = "\n# at ";
+
+   foreach $log (@{$logs})
+   {
+      if(! open LOG, "< $log")
+      {
+         _d("parse_binary_logs: cannot open binary log file '$log': $!\n") if $debug;
+         next;
+      }
+
+      _d("parse_binary_logs: parsing '$log'\n");
+
+      $use_db = '';
+
+      while($stmt = <LOG>)
+      {
+         chomp $stmt;
+         $stmt =~ s/^.*\n//;              # remove first line which will be the log pos after '# at'
+         next if $stmt !~ /\s+Query\s+/;  # skip the plethora of non-query related info
+   
+         _d("parse_binary_logs: READ: $stmt\n") if $debug;
+
+         $use_db = '' unless $db_inheritance;  # $use_db can still be overwritten later by an
+                                               # explicit USE statement or a header val if bin
+                                               # logs ever start logging the db in the header
+
+         # SQL statements are preceded with a header line like:
+         # #YYMMDD HH:MM:SS server id N end_log_pos N Query thread_id=N exec_time=N error_code=0
+         # Everything after should be SQL statements.
+   
+         $stmt =~
+         s/^.*?server id (\d+)\s+end_log_pos \d+\s+Query\s+thread_id=(\d+)\s+exec_time=([\d\.]+)\s+error_code=(\d+)\n//;
+         ($sid, $cid, $ext, $err) = ($1, $2, $3, $4);
+   
+         next if (exists $mf{sid} && !passes_meta_filter('sid', $sid, 'n'));
+         next if (exists $mf{cid} && !passes_meta_filter('cid', $cid, 'n'));
+         next if (exists $mf{ext} && !passes_meta_filter('ext', $ext, 'n'));
+         next if (exists $mf{err} && !passes_meta_filter('err', $err, 'n'));
+   
+         $stmt =~ s/^\/\*!(?!\*).*(?:\n|\z)//mg; # remove special SQL comments like /*!\C utf8 *//*!*/;
+         $stmt =~ s/^#.*(?:\n|\z)//mg;           # remove regular log comments
+
+         $valid_stmt = check_stmt(\$stmt, \$use_db);
+
+         if($valid_stmt)
+         {
+            push @{$q_a}, "USE $use_db" if ($q_a && $use_db);
+            push @{$q_a}, $stmt if $q_a;
+   
+            $q = abstract_stmt($stmt);
+
+            if(!exists ${$q_h}{$q})  # if first occurrence of $q (abstracted $stmt)
+            {
+               ${$q_h}{$q} = { id => $statement_id++, sample => $stmt, db => $use_db };
+
+               if($save_meta_values)
+               {
+                  ${$q_h}{$q}->{sid}     = $sid;
+                  ${$q_h}{$q}->{cid}     = $cid;
+                  ${$q_h}{$q}->{err}     = $err;
+                  ${$q_h}{$q}->{ext_min} = $ext;
+                  ${$q_h}{$q}->{ext_max} = $ext;
+               }
+            }
+
+            $x = ${$q_h}{$q};
+   
+            $x->{c_sum} += 1;
+
+            # this handles cases where the db for a query is discovered after
+            # the query's first occurrence
+            $x->{db} = $use_db if (!$x->{db} && $use_db);
+
+            if($save_meta_values)
+            {
+               $x->{ext_sum} += $ext;
+               $x->{ext_min}  = $ext if $ext < $x->{ext_min};
+               $x->{ext_max}  = $ext if $ext > $x->{ext_max};
+
+               push @{$x->{ext_all}}, $ext if $save_all_values;
+            }
+
+            _d("parse_binary_logs: c_sum $x->{c_sum}, db $x->{db}, SAVED stmt: $stmt\n") if $debug;
+
+         } # if($valid_stmt)
+         else
+         {
+            _d("parse_biary_logs: INVALID stmt (fails filter)\n") if $debug;
+         }
+      } # while($stmt = <LOG>)
+
+      close LOG;
+
+   } # foreach $log (@{$logs})
+}
+
+sub parse_general_logs
+{
+   my %params = @_;  # hash of params
+
+   my $logs;         # ref to array with log file names
+   my $q_h;          # ref to queries hash
+   my $u_h;          # ref to users hash (optional)
+   my $q_a;          # ref to array in which to save all statments (optional)
+   my $stmt;         # statements from log (1 or more)
+   my $have_stmt;    # 0 = reading command; 1 = reading SQL stmt
+   my $valid_stmt;   # 0 = stmt ignored due to failing a filter; 1 = stmt saved
+   my $q;            # becomes abstracted form of $stmt
+   my $x;            # becomes ref to $q_h{$q}
+   my $cmd;          # current MySQL command (Connect, Init DB, Query, Quit, etc.)
+   my $cid;          # current MySQL connection ID
+   my %use_db;       # tracks db for each cid (cid => db)
+   my %users;        # tracks user for each cid (cid => user)
+   my %hosts;        # tracks host for each cid ($cid => host)
+   my $match;        # first part of stmt after cmd
+   my $log;          # current log file name
+   my $line;         # current line read from log
+
+   # Set local vars to params for brevity ($$q_h is nicer than $$params{queries})
+   $logs = $params{logs};
+   $q_h  = $params{queries};
+   $u_h  = (exists $params{users}       ? $params{users}       : 0);
+   $q_a  = (exists $params{all_queries} ? $params{all_queries} : 0);
+
+    _d("parse_general_logs: u_h $u_h q_a $q_a\n") if $debug;
+
+   # Init some vars for safety (do I sill need to do this? other subs don't)
+   $stmt       = '';
+   $have_stmt  = 0;
+   $valid_stmt = 0;
+   $match      = '';
+   $cmd        = '';
+   $cid        = 0; 
+   $use_db{0}  = '';
+   $users{0}   = '';
+   $hosts{0}   = '';
+
+   foreach $log (@$logs)
+   {
+      if(! open LOG, "< $log")
+      {
+         _d("parse_general_logs: cannot open general log file '$log': $!\n") if $debug;
+         next;
+      }
+
+      _d("parse_general_logs: parsing '$log'\n");
+
+      while($line = <LOG>)
+      {
+         next if $line =~ /^\s*$/o;  # skip blank lines
+   
+         if(!$have_stmt)
+         {
+            # Fast-forward to a recognizable command
+            next unless $line =~ /^[\s\d:]+(?:Query|Execute|Connect|Init|Change)/o;
+   
+            # The general log has two line formats like:
+            #                       1 Prepare     [3]
+            # 060904  9:39:11       1 Query       SET autocommit=0
+            # Each if(m//) below matches one or the other line format.
+   
+            # without date and time
+            if($line =~ /^\s+(\d+) (Query|Execute|Connect|Init|Change)/o) {}
+            # with date and time
+            elsif($line =~ /^\d{6}\s+[\d:]+\s+(\d+) (Query|Execute|Connect|Init|Change)/o) {}
+            else 
+            {
+               # This shouldn't happen often. There are known cases, like 'Field List'.
+               _d("parse_general_logs: FALSE-POSITIVE match: $line") if $debug;
+               next;
+            }
+   
+            $cid = $1;
+            $cmd = $2;
+   
+            next if (exists $mf{cid} && !passes_meta_filter('cid', $cid, 'n'));
+   
+            # Init a key-val for the cid in the hashes if not already done so
+            $users{$cid}  = '' if !exists $users{$cid};
+            $hosts{$cid}  = '' if !exists $hosts{$cid};
+            $use_db{$cid} = '' if !exists $use_db{$cid};
+   
+            _d("parse_general_logs: cid $cid, cmd $cmd\n") if $debug;
+   
+            if($cmd eq "Connect")
+            {
+               # The Connect command sometimes is and sometimes is not followed by 'on'.
+               # When it is, sometimes 'on' is and somtimes 'on' is not followed by a database.
+               # Hence, the need for multiple if(m//) again.
+               if($line =~ /Connect\s+(.+) on (\w*)/o) {}
+               elsif($line =~ /Connect\s+(.+)/o) {}
+               else
+               {
+                  # This shouldn't happen often
+                  _d("parse_general_logs: FALSE-POSITIVE connect match: $line") if $debug;
+                  next;
+               }
+   
+               if($1 ne "")
+               {
+                  if($1 =~ /^Access/o)  # Ignore "Access denied for user ..."
+                  {
+                     _d("parse_general_logs: ignoring: $line") if $debug;
+                     next;
+                  }
+   
+                  my @x = split '@', $1;
+   
+                  $users{$cid} = $x[0];
+                  $hosts{$cid} = $x[1];
+               }
+               
+               if($2 && $2 ne "")
+               {
+                  $use_db{$cid} = $2;
+   
+                  if($q_a && exists $mf{db} && passes_meta_filter('db', $2, 's'))
+                  {
+                     push @{$q_a}, "USE $use_db{$cid};";
+                  }
+               }
+   
+               _d("parse_general_logs: connect $users{$cid}\@$hosts{$cid}, db $use_db{$cid}\n") if $debug;
+   
+               next;
+            }
+            elsif($cmd eq "Init")
+            {
+               $line =~ /Init DB\s+(\w+)/o;
+               $use_db{$cid} = $1;
+   
+               if($q_a && exists $mf{db} && passes_meta_filter('db', $1, 's'))
+               {
+                  push @{$q_a}, "USE $use_db{$cid};";
+               }
+   
+               _d("parse_general_logs: cid $cid, Init DB $use_db{$cid}\n") if $debug;
+   
+               next;
+            }
+            elsif($cmd eq "Change")
+            {
+               $line =~ /Change user\s+(.+) on (\w*)/o;
+   
+               my $old_cid_info = "$users{$cid}\@$hosts{$cid} db $use_db{$cid}";
+   
+               if($1 ne "")
+               {
+                  my @x = split '@', $1;
+                  $users{$cid} = $x[0];
+                  $hosts{$cid} = $x[1];
+               }
+   
+               if($2 ne "")
+               {
+                  $use_db{$cid} = $2;
+   
+                  if($q_a && exists $mf{db} && passes_meta_filter('db', $2, 's'))
+                  {
+                     push @{$q_a}, "USE $use_db{$cid};";
+                  }
+               }
+   
+               _d("parse_general_logs: cid $cid, CHANGE old:$old_cid_info > new:$users{$cid}\@$hosts{$cid} db $use_db{$cid}\n") if $debug;
+   
+               next;
+            }
+            elsif($cmd eq "Query")
+            {
+               $line =~ /Query\s+(.+)/o;
+               $match = $1;
+            }
+            elsif($cmd eq "Execute")
+            {
+               $line =~ /Execute\s+\[\d+\]\s+(.+)/o;
+               $match = $1;
+            }
+            else
+            {
+               # This should never happen
+               _d("parse_general_logs: FALSE-POSTIVE command match: $cmd\n") if $debug;
+               next;
+            }
+   
+            # At this point, Command was either Query or Execute (directly above).
+            # Therefore, we are now dealing with a new SQL statement.
+            _d("parse_general_logs: cid $cid, db $use_db{$cid}, START new stmt: $match\n") if $debug;
+            $have_stmt = 1;
+
+            # Apply meta and SQL statement filters
+            $valid_stmt = 0;
+
+            if($match !~ /^\s*\(?(\w+)\s+/o)  # extract SQL statement type
+            {
+               _d("parse_general_logs: FAIL NON-SQL statement: $match\n") if $debug;
+               next;
+            }
+
+            next if (%sf && !passes_statement_filter($1));
+
+            next if (exists $mf{user} && !passes_meta_filter('user', $users{$cid},  's'));
+            next if (exists $mf{host} && !passes_meta_filter('host', $hosts{$cid},  's'));
+            next if (exists $mf{db}   && !passes_meta_filter('db',   $use_db{$cid}, 's'));
+   
+            # All meta and statement filters passed so begin saving the SQL statement
+            $valid_stmt = 1;
+            $stmt = $match . "\n";
+   
+            # At this point, we return to while($line = <LOG>) to begin reading the subsequent lines
+            # of the new SQL statement. If it's not valid, then the lines will be ignored
+            # until the next recognizable command.
+   
+         } # if(!$have_stmt)
+         else # have_stmt
+         {
+            if($line =~ /^[\s\d:]+\d [A-Z]/o)  # New command so the SQL statement we've been reading until now is done
+            {
+               _d("parse_general_logs: NEW command (end of previous stmt)\n") if $debug;
+   
+               $have_stmt = 0;
+   
+               if($valid_stmt)
+               {
+                  if($grep && ($stmt !~ /$grep/io))
+                  {
+                     $valid_stmt = 0;
+                     _d("parse_general_logs: previous stmt FAILS grep") if $debug;
+                  }
+   
+                  if($valid_stmt)
+                  {
+                     push @$q_a, $stmt if $q_a;
+   
+                     $q = abstract_stmt($stmt);
+
+                     if(!exists ${$q_h}{$q})  # if first occurrence of $q (abstracted $stmt)
+                     {
+                        ${$q_h}{$q} = {id     => $statement_id++,
+                                       sample => $stmt,
+                                       db     => $use_db{$cid},
+                                       cid    => $cid
+                                      };
+                     }
+
+                     $x = ${$q_h}{$q};
+
+                     $x->{c_sum} += 1;
+
+                     if($save_meta_values)
+                     {
+                        $q = "$users{$cid}\@$hosts{$cid}";  # re-using $q
+                        $x->{users}->{$q} += 1;  # users of this stmt
+
+                        $$u_h{$q}->{c} += 1 if $u_h;  # all users
+                     }
+   
+                     _d("parse_general_logs: cid $cid, c_cum $x->{c_sum}, db $x->{db}: SAVED previous stmt: $stmt") if $debug;
+
+                  } # if($valid_stmt) after grep
+               } # if($valid_stmt)
+               else
+               {
+                  _d("parse_general_logs: previous stmt INVALID\n") if $debug;
+               }
+
+               redo;  # Re-read the new command to begin processing it
+
+            } # if(/^[\s\d:]+\d [A-Z]/)  # New command
+            else
+            {
+               $stmt .= $line unless !$valid_stmt;
+            }
+         } # have_stmt
+      } # while($line = <LOG>)
+
+      close LOG;
+
+   } # foreach $log (@$logs)
+}
+
+sub parse_slow_logs
+{
+   my %params = @_;  # hash of params
+
+   my $logs;         # ref to array with log file names
+   my $q_h;          # ref to queries hash
+   my $u_h;          # ref to users hash (optional)
+   my $q_a;          # ref to array in which to save all statments (optional)
+   my $msl;          # 0 = baisc slow log; 1 = microslow patched slow log
+   my $stmt;         # statements from log (1 or more)--filtered by check_stmt()
+   my $valid_stmt;   # if stmt is valid (passes all filters)
+   my $q;            # becomes abstracted form of $stmt
+   my $x;            # becomes ref to $q_h{$q}
+   my $use_db;       # db from USE db; statment
+   my $log;          # current log file name
+   my $line;         # current line read from log
+   # basic slow log meta-propteries
+   my ($user, $host, $IP);
+   my ($time, $lock, $rows_sent, $rows_examined);
+   # basic with microslow patch (msl)
+   my $cid;
+   my ($qchit, $fullscan, $fulljoin, $tmptable, $disktmptable);
+   my ($filesort, $diskfilesort, $merge);
+   # basic with microslow patch (msl) with InnoDB vals
+   my $have_innodb;
+   my ($iorops, $iorbytes, $iorwait);
+   my ($reclwait, $qwait);
+   my $pages;
+   my $short_msl;
+
+   # Set local vars to params for brevity ($$q_h is nicer than $$params{queries})
+   $logs = $params{logs};
+   $q_h  = $params{queries};
+   $u_h  = (exists $params{users}       ? $params{users}       : 0);
+   $q_a  = (exists $params{all_queries} ? $params{all_queries} : 0);
+   # $msl  = (exists $params{microslow}   ? $params{microslow}   : 0);
+   $msl = 0;
+
+   _d("parse_slow_logs: u_h $u_h q_a $q_a\n") if $debug;
+
+   foreach $log (@$logs)
+   {
+      if(!open LOG, "< $log")
+      {
+         _d("parse_slow_logs: cannot open slow log file '$log': $!\n") if $debug;
+         next;
+      }
+
+      _d("parse_slow_logs: parsing '$log'\n");
+
+      $use_db = '';
+
+      while($line = <LOG>)
+      {
+         last if !defined $line;
+         next until $line =~ /^# User/;  # Fast-forward to a recognizable header
+
+         $use_db = '' unless $db_inheritance;  # $use_db can still be overwritten later by
+                                               # Schema in the header or an explicit USE statement
+
+         ($user, $host, $IP) = $line =~
+            /^# User\@Host: (.+?) \@ (.*?) \[(.*?)\]/ ? ($1,$2,$3) : ('','','');
+
+         $user =~ s/(\w+)\[\w+\]/$1/;
+
+         next if (exists $mf{user} && !passes_meta_filter('user', $user, 's'));
+         next if (exists $mf{host} && !passes_meta_filter('host', $host, 's'));
+         next if (exists $mf{ip}   && !passes_meta_filter('ip',   $IP,   's'));
+
+         # This next line will be either the Thread_id line if it's
+         # an msl log, or it will be the Query_time line.
+         $line = <LOG>;
+         if ( $line =~ m/^# Thread_id/ ) {
+            $msl = 1;
+            
+            ($cid) = $line =~ /^# Thread_id: (\d+)\s+Schema: (.*)/;
+   
+            next if (exists $mf{cid} && !passes_meta_filter('cid', $cid, 'n'));
+
+            if($2)  # database given
+            {
+               next if (exists $mf{db} && !passes_meta_filter('db', $2, 's'));
+
+               $use_db = $2;
+            }
+         }
+
+         $line = <LOG> if $msl;
+
+         ($time, $lock, $rows_sent, $rows_examined) = $line =~
+            /^# Query_time: ([\d\.]+)\s+Lock_time: ([\d\.]+)\s+Rows_sent: (\d+)\s+Rows_examined: (\d+)/;
+
+         next if (exists $mf{t}  && !passes_meta_filter('t',  $time,          'n'));
+         next if (exists $mf{l}  && !passes_meta_filter('l',  $lock,          'n'));
+         next if (exists $mf{rs} && !passes_meta_filter('rs', $rows_sent,     'n'));
+         next if (exists $mf{re} && !passes_meta_filter('re', $rows_examined, 'n'));
+
+         $stmt = '';
+
+         if($msl)
+         {
+            $line = <LOG>;
+            if($line !~ /^# QC_Hit/)
+            {
+               $short_msl = 1;
+               $stmt = $line;
+               goto READ_STATEMENTS;
+            }
+
+            $short_msl = 0;
+
+            ($qchit, $fullscan, $fulljoin, $tmptable, $disktmptable) = $line =~
+               /^# QC_Hit: (\w+)\s+Full_scan: (\w+)\s+Full_join: (\w+)\s+Tmp_table: (\w+)\s+Tmp_table_on_disk: (\w+)/;
+   
+            $line = <LOG>;
+            ($filesort, $diskfilesort, $merge) = $line =~
+               /^# Filesort: (\w+)\s+Filesort_on_disk: (\w+)\s+Merge_passes: (\d+)/;
+   
+            next if (exists $mf{qchit}        && !passes_meta_filter('qchit',        $qchit,        's'));
+            next if (exists $mf{fullscan}     && !passes_meta_filter('fullscan',     $fullscan,     's'));
+            next if (exists $mf{fulljoin}     && !passes_meta_filter('fulljoin',     $fulljoin,     's'));
+            next if (exists $mf{tmptable}     && !passes_meta_filter('tmptable',     $tmptable,     's'));
+            next if (exists $mf{disktmptable} && !passes_meta_filter('disktmptable', $disktmptable, 's'));
+            next if (exists $mf{filesort}     && !passes_meta_filter('filesort',     $filesort,     's'));
+            next if (exists $mf{diskfilesort} && !passes_meta_filter('diskfilesort', $diskfilesort, 's'));
+            next if (exists $mf{merge}        && !passes_meta_filter('merge',        $merge,        'n'));
+   
+            $line = <LOG>;
+   
+            if($line =~ /^#\s+InnoDB_IO_r_ops/) # InnoDB values
+            {
+               $have_innodb = 1;
+   
+               ($iorops, $iorbytes, $iorwait) = $line =~
+                  /^#\s+InnoDB_IO_r_ops: (\d+)\s+InnoDB_IO_r_bytes: (\d+)\s+InnoDB_IO_r_wait: ([\d\.]+)/;
+   
+               $line = <LOG>;
+               ($reclwait, $qwait) = $line =~
+                  /^#\s+InnoDB_rec_lock_wait: ([\d\.]+)\s+InnoDB_queue_wait: ([\d\.]+)/;
+   
+               $line = <LOG>;
+               ($pages) = $line =~
+                  /^#\s+InnoDB_pages_distinct: (\d+)/;
+   
+               next if (exists $mf{iorops}   && !passes_meta_filter('iorops',   $iorops,   'n'));
+               next if (exists $mf{iorbytes} && !passes_meta_filter('iorbytes', $iorbytes, 'n'));
+               next if (exists $mf{iorwait}  && !passes_meta_filter('iorwait',  $iorwait,  'n'));
+               next if (exists $mf{reclwait} && !passes_meta_filter('reclwait', $reclwait, 'n'));
+               next if (exists $mf{qwait}    && !passes_meta_filter('qwait',    $qwait,    'n'));
+               next if (exists $mf{pages}    && !passes_meta_filter('pages',    $pages,    'n'));
+            }
+            else
+            {
+               $have_innodb = 0;
+            }
+         } # if($msl)
+
+         READ_STATEMENTS:
+         while($line = <LOG>)
+         {
+            last if $line =~ /^#(?! administrator )/; # stop at next stmt but not administrator commands
+            last if $line =~ /^\/(?![\*\/]+)/;        # stop at log header lines but not SQL comment lines
+            next if $line =~ /^\s*$/;
+   
+            $stmt .= $line;
+         }
+   
+         chomp $stmt;
+
+         $valid_stmt = check_stmt(\$stmt, \$use_db);
+   
+         if($valid_stmt)
+         {
+            push @{$q_a}, "USE $use_db" if ($q_a && $use_db);
+            push @{$q_a}, $stmt if $q_a;
+
+            $q = abstract_stmt($stmt);
+
+            if(!exists $$q_h{$q})  # if first occurrence of $q (abstracted $stmt)
+            {
+               $$q_h{$q} = { id => $statement_id++, sample => $stmt, db => $use_db };
+
+               $x = $$q_h{$q};  # just for brevity
+
+               if($save_meta_values)
+               {
+                  $x->{t_min}  = $time;
+                  $x->{t_max}  = $time;
+                  $x->{l_min}  = $lock;
+                  $x->{l_max}  = $lock;
+                  $x->{rs_min} = $rows_sent;
+                  $x->{rs_max} = $rows_sent;
+                  $x->{re_min} = $rows_examined;
+                  $x->{re_max} = $rows_examined;
+
+                  if($msl)
+                  {
+                     $x->{have_innodb} = $have_innodb;
+                     $x->{short_msl}   = $short_msl;
+                     $x->{cid}         = $cid;
+
+                     if(!$short_msl)
+                     {
+                        $x->{merge_min}   = $merge;
+                        $x->{merge_max}   = $merge;
+
+                        $x->{diskfilesort_t} = 0;
+                        $x->{disktmptable_t} = 0;
+                        $x->{filesort_t}     = 0;
+                        $x->{fulljoin_t}     = 0;
+                        $x->{fullscan_t}     = 0;
+                        $x->{tmptable_t}     = 0;
+                        $x->{qchit_t}        = 0;
+                     }
+
+                     if($have_innodb)
+                     {
+                        $x->{iorops_min}   = $iorops;
+                        $x->{iorops_max}   = $iorops;
+                        $x->{iorbytes_min} = $iorbytes;
+                        $x->{iorbytes_max} = $iorbytes;
+                        $x->{iorwait_min}  = $iorwait;
+                        $x->{iorwait_max}  = $iorwait;
+                        $x->{reclwait_min} = $reclwait;
+                        $x->{reclwait_max} = $reclwait;
+                        $x->{qwait_min}    = $qwait;
+                        $x->{qwait_max}    = $qwait;
+                        $x->{pages_min}    = $pages;
+                        $x->{pages_max}    = $pages;
+                     }
+                  } # if($msl)
+               } # if($save_meta_values)
+            } # if(!exists $$q_h{$q})
+
+            $x = $$q_h{$q};
+
+            $x->{c_sum} += 1;
+
+            # this handles cases where the db for a query is discovered after
+            # the query's first occurrence
+            $x->{db} = $use_db if (!$x->{db} && $use_db);
+
+            if($save_meta_values)
+            {
+               $x->{t_sum}  += $time;
+               $x->{l_sum}  += $lock;
+               $x->{rs_sum} += $rows_sent;
+               $x->{re_sum} += $rows_examined;
+
+               $x->{t_min}  = $time if $time < $x->{t_min};
+               $x->{t_max}  = $time if $time > $x->{t_max};
+               $x->{l_min}  = $lock if $lock < $x->{l_min};
+               $x->{l_max}  = $lock if $lock > $x->{l_max};
+               $x->{rs_min} = $rows_sent if $rows_sent < $x->{rs_min};
+               $x->{rs_max} = $rows_sent if $rows_sent > $x->{rs_max};
+               $x->{re_min} = $rows_examined if $rows_examined < $x->{re_min};
+               $x->{re_max} = $rows_examined if $rows_examined > $x->{re_max};
+
+               push @{$x->{t_all}}, $time;
+               push @{$x->{l_all}}, $lock;
+
+               if($msl && !$short_msl)
+               {
+                  $x->{qchit_t}        += 1 if $qchit        eq 'Yes';
+                  $x->{fullscan_t}     += 1 if $fullscan     eq 'Yes';
+                  $x->{fulljoin_t}     += 1 if $fulljoin     eq 'Yes';
+                  $x->{tmptable_t}     += 1 if $tmptable     eq 'Yes';
+                  $x->{disktmptable_t} += 1 if $disktmptable eq 'Yes';
+                  $x->{filesort_t}     += 1 if $filesort     eq 'Yes';
+                  $x->{diskfilesort_t} += 1 if $diskfilesort eq 'Yes';
+                  $x->{merge_sum}      += $merge;
+
+                  $x->{merge_min} = $merge if $merge < $x->{merge_min};
+                  $x->{merge_max} = $merge if $merge > $x->{merge_max};
+
+                  if($x->{have_innodb})
+                  {
+                     $x->{iorops_sum}   += $iorops;
+                     $x->{iorbytes_sum} += $iorbytes;
+                     $x->{iorwait_sum}  += $iorwait;
+                     $x->{reclwait_sum} += $reclwait;
+                     $x->{qwait_sum}    += $qwait;
+                     $x->{pages_sum}    += $pages;
+
+                     $x->{iorops_min}   = $iorops   if $iorops   < $x->{iorops_min};
+                     $x->{iorops_max}   = $iorops   if $iorops   > $x->{iorops_max};
+                     $x->{iorbytes_min} = $iorbytes if $iorbytes < $x->{iorbytes_min};
+                     $x->{iorbytes_max} = $iorbytes if $iorbytes > $x->{iorbytes_max};
+                     $x->{iorwait_min}  = $iorwait  if $iorwait  < $x->{iorwait_min};
+                     $x->{iorwait_max}  = $iorwait  if $iorwait  > $x->{iorwait_max};
+                     $x->{reclwait_min} = $reclwait if $reclwait < $x->{reclwait_min};
+                     $x->{reclwait_max} = $reclwait if $reclwait > $x->{reclwait_max};
+                     $x->{qwait_min}    = $qwait    if $qwait    < $x->{qwait_min};
+                     $x->{qwait_max}    = $qwait    if $qwait    > $x->{qwait_max};
+                     $x->{pages_min}    = $pages    if $pages    < $x->{pages_min};
+                     $x->{pages_max}    = $pages    if $pages    > $x->{pages_max};
+
+                     if($save_all_values)
+                     {
+                        push @{$x->{iorops_all}},   $iorops;
+                        push @{$x->{iorbytes_all}}, $iorbytes;
+                        push @{$x->{iorwait_all}},  $iorwait;
+                        push @{$x->{reclwait_all}}, $reclwait;
+                        push @{$x->{qwait_all}},    $qwait;
+                        push @{$x->{pages_all}},    $pages;
+                     }
+                  } # if($x->{have_innodb})
+               } # if($msl && !$short_msl)
+
+               $q = "$user\@$host $IP";  # re-using $q
+               $x->{users}->{$q} += 1;   # users of this stmt
+
+               $$u_h{$q}->{c} += 1 if $u_h;  # all users
+
+            } # if($save_meta_values)
+
+            _d("parse_slow_logs: c_sum $x->{c_sum}, db $x->{db}, SAVED stmt\n") if $debug;
+   
+         } # if($valid_stmt)
+         else
+         {
+            _d("parse_slow_logs: INVALID stmt (fails filter or grep)\n") if $debug;
+         }
+   
+         redo;
+   
+      } # while($line = <LOG>)
+
+      close LOG;
+
+   } # foreach $log (@$logs)
+
+   return $msl;
+}
+
+sub parse_udl_logs
+{
+   my %params = @_;  # hash of params
+
+   my $logs;         # ref to array with log file names
+   my $q_h;          # ref to queries hash
+   my $u_h;          # ref to users hash (optional)
+   my $q_a;          # ref to array in which to save all statments (optional)
+   my $stmt;         # statements from log (1 or more)--filtered by check_stmt()
+   my $valid_stmt;   # if stmt is valid (passes all filters)
+   my $q;            # becomes abstracted form of $stmt
+   my $x;            # becomes ref to $q_h{$q}
+   my $use_db;       # db from USE db; statment
+   my @meta_vals;    # meta vals read from log
+   my $headers;      # reference to @{$uf{headers}}
+   my $meta_names;   # reference to @{$uf{meta_names}}
+   my $meta_types;   # reference to %{$uf{meta_types}}
+   my $meta_saves;   # reference to %{$uf{meta_saves}}
+   my $t;            # used in for() loops to travers @meta_vals and $meta_names in sync
+   my $z;            # becomes shorthand for $$meta_saves{$$meta_names[$t]}
+   my $log;          # current log file name
+   my $line;         # current line read from log
+
+   # Set local vars to params for brevity ($$q_h is nicer than $$params{queries})
+   $logs = $params{logs};
+   $q_h  = $params{queries};
+   $u_h  = (exists $params{users}       ? $params{users}       : 0);
+   $q_a  = (exists $params{all_queries} ? $params{all_queries} : 0);
+
+   _d("parse_udl_logs: u_h $u_h q_a $q_a\n") if $debug;
+
+   # Set input record separator
+   local $/ = (exists $uf{rs} ? $uf{rs} : ";\n");
+
+   $headers = (exists $uf{headers} ? \@{$uf{headers}} : 0);
+
+   if($headers)
+   {
+      $meta_names = \@{$uf{meta_names}};
+      $meta_types = \%{$uf{meta_types}};
+      $meta_saves = \%{$uf{meta_saves}};
+   }
+
+   foreach $log (@$logs)
+   {
+      if(! open LOG, "< $log")
+      {
+         _d("parse_slow_logs: cannot open slow log file '$log': $!\n") if $debug;
+         next;
+      }
+
+      _d("parse_udl_logs: parsing '$log'\n");
+
+      $use_db = '';
+
+      while($stmt = <LOG>)
+      {
+         chomp $stmt;
+         $stmt =~ s/^[\s\n]+//;  # remove leading spaces and newlines
+         next if !$stmt;
+
+         _d("parse_udl_logs: READ stmt: '$stmt'\n") if $debug;
+
+         $use_db = '' unless $db_inheritance;  # $use_db can still be overwritten later by
+                                               # a header val or an explicit USE  statement
+
+         $valid_stmt = 1;
+
+         if($headers)
+         {
+            @meta_vals = ();
+
+            foreach $x (@$headers)
+            {
+               $stmt =~ s/(.+)\n//;  # grab and remove header line
+               $line = $1;           # save line
+
+               _d("parse_udl_logs: matching '$line' =~ /$x/\n") if $debug;
+
+               push @meta_vals, ($line =~ /$x/);  # match line to header; save meta vals
+            }
+
+            _d("parse_udl_logs: meta values matched: @meta_vals\n") if $debug;
+
+            if(%mf)  # apply meta filters
+            {
+               for($t = 0; $t < scalar @meta_vals; $t++)
+               {
+                  if(exists $mf{$$meta_names[$t]} &&
+                     !passes_meta_filter($$meta_names[$t], $meta_vals[$t], $$meta_types{$$meta_names[$t]}))
+                  {
+                     $valid_stmt = 0;
+                     last;
+                  }
+               }
+            } # if(%mf)
+
+            next if !$valid_stmt;  # read next stmt if this one is not valid
+
+         } # if($headers)
+
+         $valid_stmt = check_stmt(\$stmt, \$use_db);
+
+         if($valid_stmt)
+         {
+            push @{$q_a}, "USE $use_db" if ($q_a && $use_db);
+            push @{$q_a}, $stmt if $q_a;
+
+            $q = abstract_stmt($stmt);
+
+            if(!exists $$q_h{$q})  # if first occurrence of $q (abstracted $stmt)
+            {
+               $$q_h{$q} = { id => $statement_id++, sample => $stmt, db => $use_db };
+
+               $x = $$q_h{$q};  # just for brevity
+
+               if($save_meta_values)
+               {
+                  for($t = 0; $t < scalar @meta_vals; $t++)
+                  {
+                     $z = $$meta_saves{$$meta_names[$t]};  # i, na, nf
+   
+                     if($z eq 'i')  # save initial meta value once
+                     {
+                        $x->{$$meta_names[$t]} = $meta_vals[$t];
+                     }
+                     elsif($z eq 'na' || $z eq 'nf')  # save meta value plus aggregates
+                     {
+                        $x->{"$$meta_names[$t]\_min"} = $meta_vals[$t];
+                        $x->{"$$meta_names[$t]\_max"} = $meta_vals[$t];
+                     }
+                  }
+               } # if($save_meta_values)
+            } # if(!exists $q_h{$q})
+
+            $x = $$q_h{$q};
+
+            $x->{c_sum} += 1;
+
+            # this handles cases where the db for a query is discovered after
+            # the query's first occurrence
+            $x->{db} = $use_db if (!$x->{db} && $use_db);
+
+            if($save_meta_values)
+            {
+               # loop through metas again, adding up sums, calcing min/max, and saving all vals where needed
+               for($t = 0; $t < scalar @meta_vals; $t++)
+               {
+                  $z = $$meta_saves{$$meta_names[$t]};  # i, na, nf
+   
+                  if($z eq 'na' || $z eq 'nf')  # save meta value plus aggregates
+                  {
+                     $x->{"$$meta_names[$t]\_sum"} += $meta_vals[$t];
+   
+                     $x->{"$$meta_names[$t]\_min"} = $meta_vals[$t]
+                        if $meta_vals[$t] < $x->{"$$meta_names[$t]\_min"};
+                     $x->{"$$meta_names[$t]\_max"} = $meta_vals[$t]
+                        if $meta_vals[$t] > $x->{"$$meta_names[$t]\_max"};
+   
+                     if($z eq 'nf')  # numeric plus full aggregate (all values)
+                     {
+                        push @{$x->{"$$meta_names[$t]\_a"}}, $meta_vals[$t];
+                     }
+                  }
+                  elsif($z eq 'u')  # special case for user
+                  {
+                     $x->{users}->{$meta_vals[$t]} += 1;  # users of this stmt
+
+                     $$u_h{$meta_vals[$t]}->{c} += 1 if $u_h;  # all users
+                  }
+               }
+            } # if($save_meta_values)
+
+            _d("parse_udl_logs: c_sum $x->{c_sum}, db $x->{db}, SAVED stmt: $stmt\n") if $debug;
+
+         } # if($valid_stmt)
+         else
+         {
+            _d("parse_udl_logs: INVALID stmt (fails filter)\n") if $debug;
+         }
+      } # while($stmt = <LOG>)
+
+      close LOG;
+
+   } # foreach $log (@$logs)
+}
+
+# Check $stmt against SQL statement filter and grep. $stmt can contain
+# one or more SQL statments. If more than one (multi-stmts), each statment
+# is checked individually. Returns 1 if one or more statement was valid after
+# filtering, or 0 if all the statements were invalid; OR if $atomic_statments = 1:
+# returns 1 only if all statments are valid, otherwise 0.
+sub check_stmt
+{
+   _d("check_stmt\n") if $debug;
+
+   my $stmt   = shift;  # ref to scalar having statement to check
+   my $use_db = shift;  # ref to scalar in which to save db
+
+   my @lines;  # lines of stmt
+   my $line;   # current line
+
+   @lines = split(/;\n/, $$stmt);  # split statements
+
+   foreach $line (@lines)  # check each statment
+   {
+      $line .= ";\n" if $line !~ /;\s*$/;  # put ;\n back that split removed
+
+      _d("check_stmt: checking: $line" . ($line =~ /\n$/ ? '' : "\n")) if $debug;
+
+      if($line !~ /^\s*\(?(\w+)\s+/)  # extract SQL statement type
+      {
+         _d("check_stmt: FAIL NON-SQL statement line: $line\n") if $debug;
+         $line = '';
+         next;
+      }
+      else
+      {
+         if(lc($1) eq "use")
+         {
+            $line =~ /use (\w+)/i;  # grab db
+
+            # check db
+            return 0 if (exists $mf{db} && !passes_meta_filter('db', $1, 's'));
+
+            $$use_db = $1;  # save db
+            $line = '';     # remove USE statment
+         }
+         else
+         {
+            # check SQL statement filter
+            if(%sf && !passes_statement_filter($1))
+            {
+               _d("check_stmt: part of compound stmt FAILS stmt filter ($1)\n") if $debug;
+
+               return 0 if $atomic_statements;
+
+               $line = '';
+               next;
+            }
+
+            # check grep
+            if($grep && ($line !~ /$grep/io))
+            {
+               _d("check_stmt: part of compound stmt FAILS grep\n") if $debug;
+
+               return 0 if $atomic_statements;
+
+               $line = '';
+               next;
+            }
+         }
+      }
+   }  # foreach $line (@lines)
+
+   $$stmt = join '', @lines;  # rejoin statmennts
+
+   if($$stmt ne '')
+   {
+      $$stmt =~ s/\n$//;  # remove very last newline
+      return 1;           # stmt valid
+   }
+
+   return 0;  # stmt invalid
+}
+
+sub abstract_stmt
+{
+   my $q = lc shift;  # scalar having statement to abstract
+
+   my $t;  # position in q while compacting IN and VALUES
+
+   # --- Regex copied from mysqldumpslow
+   $q =~ s/\b\d+\b/N/go;
+   $q =~ s/\b0x[0-9A-Fa-f]+\b/N/go;
+   $q =~ s/''/'S'/go;
+   $q =~ s/""/"S"/go;
+   $q =~ s/(\\')//go;
+   $q =~ s/(\\")//go;
+   $q =~ s/'[^']+'/'S'/go;
+   $q =~ s/"[^"]+"/"S"/go;
+   # ---
+
+   $q =~ s/^\s+//go;      # remove leading blank space
+   $q =~ s/\s{2,}/ /go;   # compact 2 or more blank spaces to 1
+   $q =~ s/\n/ /go;       # remove newlines
+   $q =~ s/`//go;         # remove graves/backticks
+
+   # compact IN clauses: (N, N, N) --> (N3)
+   while ($q =~ m/( in\s?)/go)
+   {
+      $t = pos($q);
+      $q =~ s/\G\((?=(?:N|'S'))(.+?)\)/compact_IN($1)/e;
+      pos($q) = $t;
+   }
+
+   # compact VALUES clauses: (NULL, 'S'), (NULL, 'S') --> (NULL, 'S')2
+   while ($q =~ m/( values\s?)/go)
+   {
+      $t = pos($q);
+      $q =~ s/\G(.+?)(\s?)(;|on|\z)/compact_VALUES($1)."$2$3"/e;
+      pos($q) = $t;
+   }
+
+   return $q;  # abstracted form of stmt
+}
+
+sub compact_IN
+{
+   my $in = shift;
+
+   my $t;  # type of vals: N or 'S'
+   my $n;  # number of N or 'S' vals
+
+   $t = ($in =~ /N/ ? 'N' : 'S');  # determine type of vals
+   $n = ($in =~ tr/,//) + 1;       # count number of vals
+
+   if($abstract_in)
+   {
+      use integer;
+      my $z = $abstract_in;  # just for brevity
+      $n = (($n / $z) * $z) . '-' . (((($n / $z) + 1) * $z) - 1);
+   }
+
+   return "($t$n)";
+}
+
+sub compact_VALUES
+{
+   my $vals = shift;
+
+   my $n;  # number of (vals)
+   my $v;
+
+   $n = 1;
+   $n++ while ($vals =~ /\)\s?\,\s?\(/g);  # count number of (vals)
+
+   # take first (vals) if there are > 1
+   if($n > 1) { ($v) = ($vals =~ /^(\(.+?\))\s?\,\s?\(/); }
+   else       { $v = $vals; }
+
+   return "$v" if $abstract_values;
+
+   return "$v$n";
+}
+
+sub passes_statement_filter
+{
+   my $s = lc shift;
+   _d("passes_statement_filter: FAIL $s\n") if ($debug && ($sf{pos_neg} ^ exists $sf{$s}));
+   return !($sf{pos_neg} ^ (exists $sf{$s}));
+}
+
+sub passes_meta_filter
+{
+   my $meta = shift;
+   my $val  = shift;
+   my $type = shift;
+
+   my $c;  # condition
+
+   # _d("passes_meta_filter: meta $meta val $val type $type\n") if $debug;
+
+   if(exists $mf{$meta})
+   {
+      foreach $c (@{$mf{$meta}})
+      {
+         if($type eq 'n') # numeric
+         {
+            goto FAIL if ($c->[0] eq '<' && !($val <  $c->[1]));
+            goto FAIL if ($c->[0] eq '>' && !($val >  $c->[1]));
+            goto FAIL if ($c->[0] eq '=' && !($val == $c->[1]));
+         }
+         elsif($type eq 's') # string
+         {
+            goto FAIL if (lc($val) ne lc($c->[1]));
+         }
+      }
+
+      PASS:
+      return 1;
+   }
+
+   FAIL:
+   # _d("passes_meta_filter: FAIL $meta $val\n") if $debug;
+   return 0;
+}
+
+sub calc_final_values
+{
+   my $g_t    = pop;  # ref to scalar in which to save grand totals
+   my %params = @_;   # hash of params
+
+
+   my $q_h;  # ref to queries hash
+   my $u_h;  # ref to users hash (optional)
+   my $q;
+   my $x;
+   my $y;
+   my $z;
+   my $total_queries;
+
+   $q_h  = $params{queries};
+   $u_h  = (exists $params{users} ? $params{users} : 0);
+
+   $g_t ||= 0;
+
+   _d("calc_final_values: u_h $u_h g_t $g_t\n") if $debug;
+
+   $total_queries = 0;
+   foreach $q (keys %$q_h) { $total_queries += $$q_h{$q}->{c_sum}; }
+   _d("calc_final_values: total queries: $total_queries\n") if $debug;
+
+   foreach $q (keys %$q_h)
+   {
+      $x = $$q_h{$q};
+
+      $x->{c_sum_p} = _p($x->{c_sum}, $total_queries);
+
+      # Calculate averages: scan through every query's keys (its meta-property names)
+      # looking for any one ending with _max. If one is found, then we know this
+      # meta-property is being aggregate and needs an _avg value. For example:
+      # if this were a slow log, we'd find "l_max" and then know we need an "l_avg".
+      # We could look for _min too, but not _sum because that would match c_sum
+      # and result in a useless c_sum_avg (c_sum / c_sum). Furthermore, during this
+      # process, we add log-wide grand totals for aggregateble meta-properties
+      # ($$g_t{"gt_$1"} += $x->{"$1\_sum"} if $g_t;) and for any _t type meta-
+      # props (if($z =~ /(\w+_t)$/)) we calc their percent TRUE--these are purely
+      # bivalent values like the msl meta-props diskfilesort_t, tmptable_t, etc.
+      foreach $z (keys %$x)
+      {
+         if($z =~ /([a-z]+)_(?:max)$/)  # aggrevate values
+         {
+            $x->{"$1\_avg"} = $x->{"$1\_sum"} / $x->{c_sum};
+            $$g_t{"gt_$1"} += $x->{"$1\_sum"} if $g_t;
+            next;
+         }
+
+         if($z =~ /(\w+_t)$/)  # bivalent _t values
+         {
+            $x->{"$1\_p"} = _p($x->{$1}, $x->{c_sum});
+            next;
+         }
+      }
+   }
+
+   # Now that we've added all available grand totals, we loop through %$g_t
+   # and calc for every query in %$q_h things like t_sum_p: percentage that
+   # t_sum constitutes of grand total t for all SQL statements in log.
+   if($g_t)
+   {
+      foreach $z (keys %$g_t)
+      {
+         $z =~ /^gt_(\w+)/;
+         $y = $1;
+
+         foreach $q (keys %$q_h)
+         {
+            $x = $$q_h{$q};
+            next if !exists $x->{"$y\_sum"};
+            $x->{"$y\_sum_p"} = _p($x->{"$y\_sum"}, $$g_t{$z});
+         }
+      }
+   }
+
+   # And finally, calc the percentage that each unique user constitutes of all users
+   if($u_h)
+   {
+      foreach $z (keys %$u_h)
+      {
+         $$u_h{$z}->{p} = _p($$u_h{$z}->{c}, $total_queries);
+      }
+      
+      $$u_h{total} = scalar keys %$u_h;  # total number of unique users
+   }
+
+   return $total_queries;
+}
+
+sub apply_final_meta_filters
+{
+   my $total_queries = pop;  # ref to scalar having total number of queries
+                             # to be adjusted for removed queries
+   my %params        = @_;   # hash of params
+
+   my $q_h;  # ref to queries hash
+   my $q;
+   my $x;
+   my $meta;
+   my $val;
+   my $c;
+   my $removed;
+
+   $q_h = $params{queries};
+
+   $total_queries ||= 0;
+   $removed         = 0;
+
+   _d("apply_final_meta_filters: total queries before: $$total_queries\n") if $debug;
+
+   foreach $meta (keys %mf)  # e.g. t_max
+   {
+      next unless $meta =~ /_(?:min|max|avg|sum|p)$/;
+                     
+      foreach $q (keys %$q_h)
+      {
+         $x = $$q_h{$q};
+
+         if(!exists $x->{$meta})  # next meta if stmts don't have this meta
+         {
+            _d("apply_final_meta_filters: stmt does not have $meta: $q\n") if $debug;
+            next;
+         }
+
+         $val = $x->{$meta};  # stmt's val for meta
+
+         foreach $c (@{$mf{$meta}})  # for each filter condition
+         {
+            goto FAIL if ($c->[0] eq '<' && !($val <  $c->[1]));
+            goto FAIL if ($c->[0] eq '>' && !($val >  $c->[1]));
+            goto FAIL if ($c->[0] eq '=' && !($val == $c->[1]));
+         }
+
+         next;
+
+         FAIL:
+         _d("apply_final_meta_filters: FAIL $meta $val: $q\n") if $debug;
+         $removed += $$q_h{$q}->{c_sum};
+         delete($$q_h{$q});
+      }
+   }
+
+   _d("apply_final_meta_filters: total queries after: $$total_queries ($removed removed)\n") if $debug;
+
+   $$total_queries -= $removed if $total_queries;
+
+   return $removed;
+}
+
+
+#
+# Internal subs not exported; for call directly by hackers
+#
+sub set_debug 
+{
+   $debug             = shift;
+   $debug_filehandles = shift;
+}
+
+# Print debug messages to STDOUT and filehandles given in @debug_filehandles
+sub _d
+{
+   return if !$debug;
+
+   my $msg = shift;
+
+   my $fh;
+
+   print "--- $msg";
+   foreach $fh (@$debug_filehandles) { print $fh, "--- $msg";  }
+}
+
+# What percentage is x of y
+sub _p
+{
+   my ($x, $y) = @_;
+   return sprintf "%.2f", ($x * 100) / ($y ||= 1);
+}
+
+
+1;
+
+###############################################################################
+# END (MySQL::Log::)ParseFilter                                               #
+###############################################################################
+
+###############################################################################
+# ReportFormats                                                               #
+###############################################################################
+
+# These are the default report formats for each log type
+
+package ReportFormats;
+
+my %report_formats;
+
+$report_formats{slow} =<<"EOF";
+-nthp
+
+HEADER
+Report for %s logs: %s
+lt:op logs
+%s queries total, %s unique
+total_queries:short total_unique_queries:short
+Sorted by '%s'
+sort:op
+Grand Totals: Time %s s, Lock %s s, Rows sent %s, Rows Examined %s
+gt_t:short gt_l:short gt_rs:short gt_re:short
+
+REPORT
+
+______________________________________________________________________ %03d ___
+sort_rank
+Count         : %s  (%.2f%%)
+c_sum:short c_sum_p
+Time          : %s total, %s avg, %s to %s max  (%.2f%%)
+t_sum:micro t_avg:micro t_min:micro t_max:micro t_sum_p
+? %3s%% of Time : %s total, %s avg, %s to %s max
+nthp:op t_sum_nthp:micro t_avg_nthp:micro t_min_nthp:micro t_max_nthp:micro
+? Distribution : %s
+t_dist
+Lock Time (s) : %s total, %s avg, %s to %s max  (%.2f%%)
+l_sum:micro l_avg:micro l_min:micro l_max:micro l_sum_p
+? %3s%% of Lock : %s total, %s avg, %s to %s max
+nthp:op l_sum_nthp:micro l_avg_nthp:micro l_min_nthp:micro l_max_nthp:micro
+Rows sent     : %s avg, %s to %s max  (%.2f%%)
+rs_avg:short rs_min:short rs_max:short rs_sum_p
+Rows examined : %s avg, %s to %s max  (%.2f%%)
+re_avg:short re_min:short re_max:short re_sum_p
+Database      : %s
+db
+Users         : %s
+users
+?Table:#rows   : %s
+tcount
+?Table schemas : %s
+tschema
+?EXPLAIN       : %s
+explain
+
+Query abstract:
+_
+%s
+query:cap
+
+Query sample:
+_
+%s
+sample
+
+EOF
+
+$report_formats{general} =<<"EOF";
+
+HEADER
+Report for %s logs: %s
+lt:op logs
+%s queries total, %s unique
+total_queries:short total_unique_queries:short
+Sorted by '%s'
+sort:op
+
+REPORT
+
+______________________________________________________________________ %03d ___
+sort_rank
+Count         : %s (%.2f%%)
+c_sum:short c_sum_p
+Connection ID : %d
+cid
+Database      : %s
+db
+Users         : %s
+users
+?Table:#rows   : %s
+tcount
+?Table schemas : %s
+tschema
+?EXPLAIN       : %s
+explain
+
+Query abstract:
+_
+%s
+query:cap
+
+Query sample:
+_
+%s
+sample
+
+EOF
+
+$report_formats{binary} =<<"EOF";
+
+HEADER
+Report for %s logs: %s
+lt:op logs
+%s queries total, %s unique
+total_queries:short total_unique_queries:short
+Sorted by '%s'
+sort:op
+
+REPORT
+
+______________________________________________________________________ %03d ___
+sort_rank
+Count             : %s (%.2f%%)
+c_sum:short c_sum_p
+Connection ID     : %d
+cid
+Server ID         : %d
+sid
+Error code        : %d
+err
+Execution Time (s): %d total, %d avg, %d to %d max
+ext_sum ext_avg ext_min ext_max
+? %3s%% of Ex Time: %d total, %d avg, %d to %d max
+nthp:op ext_sum_nthp ext_avg_nthp ext_min_nthp ext_max_nthp
+Database          : %s
+db
+Users             : %s
+users
+
+Query abstract:
+_
+%s
+query:cap
+
+Query sample:
+_
+%s
+sample
+
+EOF
+
+$report_formats{msl} =<<"EOF";
+-nthp
+
+HEADER
+Report for %s logs: %s
+lt:op logs
+%s queries total, %s unique
+total_queries:short total_unique_queries:short
+Sorted by '%s'
+sort:op
+Grand Totals: Time %.3f s, Lock %.3f s, Rows sent %s, Rows Examined %s
+gt_t gt_l gt_rs:short gt_re:short
+
+REPORT
+
+______________________________________________________________________ %03d ___
+sort_rank
+Count         : %s  (%.2f%%)
+c_sum:short c_sum_p
+Time          : %s total, %s avg, %s to %s max  (%.2f%%)
+t_sum:micro t_avg:micro t_min:micro t_max:micro t_sum_p
+? %3s%% of Time : %s total, %s avg, %s to %s max
+nthp:op t_sum_nthp:micro t_avg_nthp:micro t_min_nthp:micro t_max_nthp:micro
+Lock Time     : %s total, %s avg, %s to %s max  (%.2f%%)
+l_sum:micro l_avg:micro l_min:micro l_max:micro l_sum_p
+? %3s%% of Lock : %s total, %s avg, %s to %s max
+nthp:op l_sum_nthp:micro l_avg_nthp:micro l_min_nthp:micro l_max_nthp:micro
+Rows sent     : %s avg, %s to %s max  (%.2f%%)
+rs_avg:short rs_min:short rs_max:short  rs_sum_p
+Rows examined : %s avg, %s to %s max  (%.2f%%)
+re_avg:short re_min:short re_max:short  re_sum_p
+Database      : %s
+db
+Users         : %s
+users
+?Table:#rows   : %s
+tcount
+?Table schemas : %s
+tschema
+?EXPLAIN       : %s
+explain
+
+?QC hit        : %d%% (%d)
+qchit_t_p qchit_t
+?Full scan     : %d%% (%d)
+fullscan_t_p fullscan_t
+?Full join     : %d%% (%d)
+fulljoin_t_p fulljoin_t
+?Tmp table     : %d%% (%d)
+tmptable_t_p tmptable_t
+?Disk tmp table: %d%% (%d)
+disktmptable_t_p disktmptable_t
+?Filesort      : %d%% (%d)
+filesort_t_p filesort_t
+?Disk filesort : %d%% (%d)
+diskfilesort_t_p diskfilesort_t
+?Merge passes  : %s total, %s avg, %s to %s max
+merge_sum:short  merge_avg:short merge_min:short merge_max:short
+
+?IO r ops      : %s total, %s avg, %s to %s max  (%.2f%%)
+iorops_sum:short iorops_avg:short iorops_min:short iorops_max:short iorops_sum_p
+?IO r bytes    : %s total, %s avg, %s to %s max  (%.2f%%)
+iorbytes_sum:short iorbytes_avg:short iorbytes_min:short iorbytes_max:short iorbytes_sum_p
+?IO r wait     : %s total, %s avg, %s to %s max  (%.2f%%)
+iorwait_sum:micro iorwait_avg:micro iorwait_min:micro iorwait_max:micro iorwait_sum_p
+?Rec lock wait : %s total, %s avg, %s to %s max  (%.2f%%)
+reclwait_sum:micro reclwait_avg:micro reclwait_min:micro reclwait_max:micro reclwait_sum_p
+?Queue wait    : %s total, %s avg, %s to %s max  (%.2f%%)
+qwait_sum:micro qwait_avg:micro qwait_min:micro qwait_max:micro qwait_sum_p
+?Pages distinct: %s total, %s avg, %s to %s max  (%.2f%%)
+pages_sum:short pages_avg:short pages_min:short pages_max:short pages_sum_p
+
+Query abstract:
+_
+%s
+query:cap
+
+Query sample:
+_
+%s
+sample
+
+EOF
+
+$report_formats{udl} =<<"EOF";
+
+HEADER
+Report for %s logs: %s
+lt:op logs
+%s queries total, %s unique
+total_queries:short total_unique_queries:short
+Sorted by '%s'
+sort:op
+
+REPORT
+
+______________________________________________________________________ %03d ___
+sort_rank
+Count         : %s (%.2f%%)
+c_sum:short c_sum_p
+Database      : %s
+db
+?Table:#rows   : %s
+tcount
+?Table schemas : %s
+tschema
+?EXPLAIN       : %s
+explain
+
+Query abstract:
+_
+%s
+query:cap
+
+Query sample:
+_
+%s
+sample
+
+EOF
+
+sub get_report_format
+{
+   my $log_type = shift;
+
+   return $report_formats{$log_type};
+}
+
+1;
+
+###############################################################################
+# END ReportFormats                                                           #
+###############################################################################
+
+# #############################################################################
+# LogType package $Revision$
+# #############################################################################
+package LogType;
+
+use strict;
+use warnings FATAL => 'all';
+use English qw(-no_match_vars);
+
+use constant MKDEBUG          => $ENV{MKDEBUG};
+use constant LOG_TYPE_UNKNOWN => 0;
+use constant LOG_TYPE_SLOW    => 1;
+use constant LOG_TYPE_GENERAL => 2;
+use constant LOG_TYPE_BINARY  => 3;
+# Make sure the constants above and the line below are kept in sync.
+my @log_type_names = ( qw(unknown slow general binary) );
+
+my %patterns_for = (
+   LogType::LOG_TYPE_SLOW    => [
+      qr/^# User\@Host:/,
+   ],
+   LogType::LOG_TYPE_GENERAL => [
+      qr/^\d{6}\s+\d\d:\d\d:\d\d/,
+      qr/^\s+\d+\s+[A-Z][a-z]+\s+/,
+   ],
+   LogType::LOG_TYPE_BINARY  => [
+      qr/^.*?server id \d+\s+end_log_pos/,
+   ],
+);
+
+sub new {
+   my ( $class, %args ) = @_;
+   my %default_args = (
+      sample_size     => 10, # number of lines to read for the log sample
+      detection_order => [   # preferred order in which to detect log types
+         LOG_TYPE_SLOW,
+         LOG_TYPE_GENERAL,
+         LOG_TYPE_BINARY,
+      ],
+   );
+   my $self = { %default_args, %args };
+   return bless $self, $class;
+}
+
+sub get_log_type {
+   my ( $self, $log_file ) = @_;
+   $log_file ||= '';
+   MKDEBUG && _d("Detecting log type for $log_file");
+   return LOG_TYPE_UNKNOWN if !$log_file;
+   
+   my $log_fh;
+   if ( !open $log_fh, '<', $log_file ) {
+      MKDEBUG && _d("Failed to open $log_file: $OS_ERROR");
+      return LOG_TYPE_UNKNOWN;
+   }
+
+   my @lines   = ();
+   my $n_lines = 0;
+   while ( ($n_lines++ < $self->{sample_size}) && (my $line = <$log_fh>) ) {
+      push @lines, $line;
+   }
+   close $log_fh;
+
+   foreach my $log_type ( @{ $self->{detection_order} } ) {
+      if ( $self->lines_match_log_type(\@lines, $log_type) ) {
+         MKDEBUG && _d("Log is type $log_type");
+         return $log_type;
+      }
+   }
+
+   MKDEBUG && _d("Log type is unknown");
+   return LOG_TYPE_UNKNOWN;
+}
+
+sub lines_match_log_type {
+   my ( $self, $lines, $log_type ) = @_;
+   return 0 if ( !ref $lines || scalar @$lines == 0 );
+   foreach my $pattern ( @{ $patterns_for{$log_type} } ) {
+      foreach my $line  ( @$lines ) {
+         if ( $line =~ m/$pattern/ ) {
+            MKDEBUG && _d("Log type $log_type pattern $pattern matches $line");
+            return 1;
+         }
+      }
+   }
+   return 0;
+}
+
+sub name_for {
+   return $log_type_names[$_[1]];
+}
+
+sub _d {
+   my ( $line ) = (caller(0))[2];
+   print "# LogType:$line $PID ", @_, "\n";
+}
+
+1;
+# #############################################################################
+# End LogType package
+# #############################################################################
+
+# ###########################################################################
+# QueryRewriter package $Revision: 2215 $
+# ###########################################################################
+use strict;
+use warnings FATAL => 'all';
+
+package QueryRewriter;
+
+use English qw(-no_match_vars);
+
+use constant MKDEBUG => $ENV{MKDEBUG};
+
+my $quote_re = qr/"(?:(?!(?<!\\)").)*"|'(?:(?!(?<!\\)').)*'/; # Costly!
+my $bal;
+$bal         = qr/
+                  \(
+                  (?:
+                     (?> [^()]+ )    # Non-parens without backtracking
+                     |
+                     (??{ $bal })    # Group with matching parens
+                  )*
+                  \)
+                 /x;
+
+
+sub new {
+   my ( $class ) = @_;
+   bless {}, $class;
+}
+
+# Strips comments out of queries.
+sub strip_comments {
+   my ( $self, $query ) = @_;
+   $query =~ s/[\r\n]+\s*(?:--|#).*//gm; # One-line comments
+   $query =~ s#/\*[^!]*?\*/##gsm;   # /*..*/ comments, but not /*!version */
+   return $query;
+}
+
+# Normalizes variable queries to a "query fingerprint" by abstracting away
+# parameters, canonicalizing whitespace, etc.  See
+# http://dev.mysql.com/doc/refman/5.0/en/literals.html for literal syntax.
+sub fingerprint {
+   my ( $self, $query, $opts ) = @_;
+   $opts ||= {};
+   $query = lc $query;
+   $query =~ s{
+              (?<![\w.+-])
+              [+-]?
+              (?:
+                \d+
+                (?:[.]\d*)?
+                |[.]\d+
+              )
+              (?:e[+-]?\d+)?
+              \b
+             }
+             {N}gx;                             # Float/real into N
+   $query =~ s/\b0(?:x[0-9a-f]+|b[01]+)\b/N/g;  # Hex/bin into N
+   $query =~ s/[xb]'N'/N/g;                     # Hex/bin into N
+   $query =~ s/\\["']//g;                       # Turn quoted strings into S
+   $query =~ s/(["']).*?\1/S/g;                 # Turn quoted strings into S
+   $query =~ s/\A\s+//;                         # Chop off leading whitespace
+   $query =~ s/\s{2,}/ /g;                      # Collapse all whitespace
+   $query =~ s/[\n\r\f]+/ /g;                   # Collapse newlines etc
+   $query =~ s/\Ause \S+\Z/use I/;              # Abstract the DB in USE
+   $query =~ s{
+               \b(in|values?)\s*\(\s*([NS])\s*,[^\)]*\)
+              }
+              {$1($2+)}gx;      # Collapse IN() and VALUES() lists
+   # Table names that end with one or two groups of digits
+   $query =~ s/(?<=\w_)\d+(_\d+)?\b/$1 ? "N_N" : "N"/eg;
+   if ( $opts->{prefixes} ) { # or begin with them...
+      $query =~ s/\b\d+(_\d+)?(?=[a-zA-Z_])/$1 ? "N_N" : "N"/eg;
+   }
+   return $query;
+}
+
+sub convert_to_select {
+   my ( $self, $query ) = @_;
+   return unless $query;
+   $query =~ s{
+                 \A.*?
+                 update\s+(.*?)
+                 \s+set\b(.*?)
+                 (?:\s+where\b(.*?))?
+                 (limit\s*\d+(?:\s*,\s*\d+)?)?
+                 \Z
+              }
+              {__update_to_select($1, $2, $3, $4)}exsi
+      || $query =~ s{
+                    \A.*?
+                    (?:insert|replace)\s+
+                    .*?\binto\b(.*?)\(([^\)]+)\)\s*
+                    values?\s*(\(.*?\))\s*
+                    (?:\blimit\b|on\s*duplicate\s*key.*)?\s*
+                    \Z
+                 }
+                 {__insert_to_select($1, $2, $3)}exsi
+      || $query =~ s{
+                    \A.*?
+                    delete\s+(.*?)
+                    \bfrom\b(.*)
+                    \Z
+                 }
+                 {__delete_to_select($1, $2)}exsi;
+   $query =~ s/\s*on\s+duplicate\s+key\s+update.*\Z//si;
+   $query =~ s/\A.*?(?=\bSELECT\s*\b)//ism;
+   return $query;
+}
+
+sub convert_select_list {
+   my ( $self, $query ) = @_;
+   $query =~ s{
+               \A\s*select(.*?)\bfrom\b
+              }
+              {$1 =~ m/\*/ ? "select 1 from" : "select isnull(coalesce($1)) from"}exi;
+   return $query;
+}
+
+sub __delete_to_select {
+   my ( $delete, $join ) = @_;
+   if ( $join =~ m/\bjoin\b/ ) {
+      return "select 1 from $join";
+   }
+   return "select * from $join";
+}
+
+sub __insert_to_select {
+   my ( $tbl, $cols, $vals ) = @_;
+   MKDEBUG && _d('Args: ', @_);
+   my @cols = split(/,/, $cols);
+   MKDEBUG && _d('Cols: ', @cols);
+   $vals =~ s/^\(|\)$//g; # Strip leading/trailing parens
+   my @vals = $vals =~ m/($quote_re|[^,]*${bal}[^,]*|[^,]+)/g;
+   MKDEBUG && _d('Vals: ', @vals);
+   if ( @cols == @vals ) {
+      return "select * from $tbl where "
+         . join(' and ', map { "$cols[$_]=$vals[$_]" } (0..$#cols));
+   }
+   else {
+      return "select * from $tbl limit 1";
+   }
+}
+
+sub __update_to_select {
+   my ( $from, $set, $where, $limit ) = @_;
+   return "select $set from $from "
+      . ( $where ? "where $where" : '' )
+      . ( $limit ? " $limit "      : '' );
+}
+
+sub wrap_in_derived {
+   my ( $self, $query ) = @_;
+   return unless $query;
+   return $query =~ m/\A\s*select/i
+      ? "select 1 from ($query) as x limit 1"
+      : $query;
+}
+
+sub _d {
+   my ( $line ) = (caller(0))[2];
+   @_ = map { (my $temp = $_) =~ s/\n/\n# /g; $temp; } @_;
+   print "# QueryRewriter:$line $PID ", @_, "\n";
+}
+
+1;
+
+# ###########################################################################
+# End QueryRewriter package
+# ###########################################################################
+
+###############################################################################
+# mysqlsla                                                                    #
+###############################################################################
+package main;
+
+# mysqlsla: parse, filter, analyze and sort MySQL logs
+# http://hackmysql.com/mysqlsla
+# Copyright 2007-2008 Daniel Nichter
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# The GNU General Public License is available at:
+# http://www.gnu.org/copyleft/gpl.html
+
+use strict;
+use English qw(-no_match_vars);
+use Time::HiRes qw(gettimeofday tv_interval);
+use File::Temp qw(tempfile);
+use Data::Dumper;
+use DBI;
+use Getopt::Long;
+use Storable;
+eval { require Term::ReadKey; };
+my $RK = ($@ ? 0 : 1);
+
+our $VERSION = '2.03';
+
+my $WIN = ($^O eq 'MSWin32' ? 1 : 0);
+my %op;
+my %mycnf; # ~/.my.cnf
+my ($dbh, $query, $MySQL_connected);
+my ($q_h, %queries, %u_h, $q_a, @all_queries, %g_t);
+my $total_queries;
+my $total_unique_queries;
+my $total_unique_users;
+my $u = chr(($WIN ? 230 : 181)) . 's'; # micro symbol
+my %params;
+my %MySQL_reserved_words; # used by beautify()
+my %db; # --databases
+my %af; # --analysis-filter
+my %r;  # --reports
+my (@headers, @header_vals);  #
+my (@formats, @format_vals);  # standard report
+my %conditional_formats;      #
+
+read_dot_mysqlsla();  # read ~/.mysqlsla
+get_options();        # parse command line options which override ~/.mysqlsla 
+
+help_and_exit() if $op{help};
+
+if ( !$op{lt} ) {
+   my $lt = new LogType;
+   my $log_type = $lt->get_log_type($ARGV[0]);
+   die 'Cannot auto-detect log type. Use option --log-type.' if !$log_type;
+   $op{lt} = $lt->name_for($log_type);
+   print "Auto-detected logs as $op{lt} logs\n";
+}
+
+$op{reports} ||= 'standard';
+$op{rf}      ||= 0;
+
+$op{reports} = '' if $op{silent};  # -silent overrides -reports
+
+%r = map { $_ => 0 } split ',', $op{reports};
+
+my %extras;
+if ( $op{extra} ) {
+   %extras = map { $_ => 1 } split ',', $op{extra};
+}
+
+parse_report_format($op{rf},
+                    \@headers, \@header_vals,
+                    \@formats, \@format_vals,
+                    \%conditional_formats) if exists $r{standard};
+
+read_mycnf() unless $op{'no-mycnf'};  # read ~/.my.cnf or $op{mycnf}
+
+# Command line options override ~/.my.cnf
+$mycnf{host}   = $op{host}   if $op{host};
+$mycnf{port}   = $op{port}   if $op{port};
+$mycnf{socket} = $op{socket} if $op{socket};
+$mycnf{user}   = $op{user}   if $op{user};
+
+$mycnf{user} ||= $ENV{USER};
+
+# Set ParseFilter tweaks
+ParseFilter::set_save_meta_values(0)      if $op{'dont-save-meta-values'};
+ParseFilter::set_save_all_values(1)       if $op{'save-all-values'};
+ParseFilter::set_IN_abstraction($op{Ai})  if $op{Ai};
+ParseFilter::set_VALUES_abstraction(1)    if $op{Av};
+ParseFilter::set_atomic_statements(1)     if $op{'atomic-statements'};
+ParseFilter::set_db_inheritance(1)        if $op{'db-inheritance'};
+ParseFilter::set_grep($op{grep})          if $op{grep};
+ParseFilter::set_debug(1)                 if $op{debug};
+
+# Must check and set this before we call set_statement_filter() below
+if(($op{te} || exists $r{'time-all'}))
+{
+   if(!$op{sf})
+   {
+      print STDERR "Safety for time-each/time-all is enabled (statement-filter='+SELECT,USE')\n";
+      $op{sf} = "+SELECT,USE";
+   }
+   else
+   {
+      print STDERR "Safety for time-each/time-all is DISABLED!\n";
+   }
+}
+
+ParseFilter::set_meta_filter($op{mf})      if $op{mf};
+ParseFilter::set_statement_filter($op{sf}) if $op{sf};
+ParseFilter::set_udl_format($op{uf})       if $op{uf};
+
+$op{avg} ||= 1;
+
+$q_a = (exists $r{'time-all'} || exists $r{'print-all'} ? \@all_queries : 0);
+
+if($op{replay}) { $q_h = retrieve($op{replay}); }
+else            { $q_h = \%queries;             }
+
+# Used in parse_logs() and passed to various ParseFilter subs
+%params = (logs        => \@ARGV,
+           queries     => $q_h,
+           users       => \%u_h,
+           all_queries => $q_a,
+           microslow   => ($op{lt} eq 'msl' ? 1 : 0));
+
+
+
+LOG_PARSING:
+
+refilter_replay($q_h) if ($op{replay} && ($op{sf} || $op{mf}));
+parse_logs() if @ARGV;
+
+$total_queries = ParseFilter::calc_final_values(%params, \%g_t);
+ParseFilter::apply_final_meta_filters(%params, \$total_queries) if $op{mf};
+
+save_replay($op{'post-parse-replay'}) if $op{'post-parse-replay'};
+
+
+
+ANALYSES:
+
+if($op{db}) { %db = map { $_ => 1 } split ',', $op{db}; }
+
+calc_nthp($q_h)         if exists $op{nthp};
+calc_dist($q_h)         if $op{dist};
+time_each_query($q_h)   if $op{te};
+
+save_replay($op{'post-analyses-replay'}) if $op{'post-analyses-replay'};
+
+
+
+REPORTING:
+
+$total_unique_queries = scalar keys %$q_h;
+$total_unique_users   = $u_h{total};
+
+set_MySQL_reserved_words();  # need for beautify()
+
+sort_and_prune();
+
+EXPLAIN_queries($q_h) if ($op{ex} || $extras{tcount} || $extras{tschema});
+
+save_replay($op{'post-sort-replay'}) if $op{'post-sort-replay'};
+
+make_reports() unless $op{silent};
+
+exit;
+
+
+
+#
+# Subroutines
+#
+
+sub help_and_exit
+{
+   my $msg = shift;
+   print "\n$msg\n" if $msg;
+   print "man mysqlsla for help or visit http://hackmysql.com/mysqlsla\n\n";
+   exit;
+}
+
+sub read_mycnf
+{
+   $op{mycnf} ||= "$ENV{HOME}/.my.cnf";
+
+   d("read_mycnf: '$op{mycnf}'\n") if $op{debug};
+
+   if(!open MYCNF, "< $op{mycnf}")
+   {
+      d("read_mycnf: cannot open '$op{mycnf}': $!\n") if $op{debug};
+      return;
+   }
+
+   while(<MYCNF>) { $mycnf{$1} = $2 if /^(.+?)\s*=\s*"?(.+?)"?\s*$/; }
+
+   close MYCNF;
+
+   $mycnf{'pass'} ||= $mycnf{'password'} if exists $mycnf{'password'};
+}
+
+sub read_dot_mysqlsla
+{
+   open MYSQLSLA, "< $ENV{HOME}/.mysqlsla" or return;
+
+   while(<MYSQLSLA>)
+   {
+      next if /^$/;
+      next if /^#/;
+      $op{$1} = $2, next if /^(\S+)\s*=\s*(\S+)/;
+      $op{$1} = 1,  next if /^(\S+)/;
+   }
+
+   close MYSQLSLA;
+}
+
+sub connect_to_MySQL
+{
+   return if $MySQL_connected;
+
+   my $test = shift;
+
+   my $dsn;
+
+   $test ||= 0;
+
+   d("connect_to_MySQL: test $test\n") if $op{debug};
+
+   if(exists $op{password})
+   {
+      if($op{password} eq '') # Prompt for password
+      {
+         Term::ReadKey::ReadMode(2) if $RK;
+         print STDERR "Password for MySQL user $mycnf{user}: ";
+         chomp($mycnf{pass} = <STDIN>);
+         Term::ReadKey::ReadMode(0), print "\n" if $RK;
+      }
+      else { $mycnf{pass} = $op{password}; } # Use password given on command line
+   }
+
+   if($mycnf{'socket'} && -S $mycnf{'socket'})
+   {
+      $dsn = "DBI:mysql:mysql_socket=$mycnf{socket}";
+   }
+   elsif($mycnf{'host'})
+   {
+      $dsn = "DBI:mysql:host=$mycnf{host}" . ($mycnf{port} ? ";port=$mycnf{port}" : "");
+   }
+   else
+   {
+      $dsn = "DBI:mysql:host=localhost";
+   }
+
+   d("connect_to_MySQL: DBI DSN: $dsn\n") if $op{debug};
+
+   $dbh = DBI->connect($dsn, $mycnf{'user'}, $mycnf{'pass'}, { PrintError => 0 });
+
+   if($DBI::err)
+   {
+      print STDERR "Cannot connect to MySQL.\n";
+      print STDERR "MySQL error message: $DBI::errstr\n";
+      exit;
+   }
+
+   if($test)
+   {
+      $dbh->disconnect();
+      $MySQL_connected = 0;
+      return;
+   }
+
+   $MySQL_connected = 1;
+}
+
+sub parse_logs 
+{
+   my $retval = 0;
+
+   if($op{lt}    eq 'binary')  { ParseFilter::parse_binary_logs(%params);   }
+   elsif($op{lt} eq 'general') { ParseFilter::parse_general_logs(%params);  }
+   elsif($op{lt} eq 'slow')    { $retval = ParseFilter::parse_slow_logs(%params);     }
+   elsif($op{lt} eq 'msl')     { $retval = ParseFilter::parse_slow_logs(%params);     }
+   elsif($op{lt} eq 'udl')     { ParseFilter::parse_udl_logs(%params);      }
+   else
+   {
+      help_and_exit("Cannot parse logs: unknown log type: $op{lt}\n");
+   }
+
+   $op{lt} = 'msl' if $retval == 1;
+}
+
+sub refilter_replay
+{
+   my $q_h = shift;  # hash ref
+
+   my $q;
+   my $x;
+   my $meta;
+   my $type;
+   my %type_cache;
+   my $mf;
+   my $sf;
+
+   $mf = ParseFilter::get_meta_filter();
+   $sf = ParseFilter::get_statement_filter();
+
+   d("refilter_replay\n") if $op{debug};
+
+   foreach $q (keys %$q_h)
+   {
+      $x = $$q_h{$q};
+
+      foreach $meta (keys %{$x})
+      {
+
+         if(ref($x->{$meta}))
+         {
+            # d("refilter_replay: skipping ref $meta\n") if $op{debug};
+            next;
+         }
+
+         # Reapply any meta-filters
+         if($op{mf} && exists $$mf{$meta})
+         {
+            # Perl is loosely typed yet we must know whether meta is
+            # numeric or string otherwise passes_meta_filter() may fail
+            # because in Perl "foo1" == "foo2" is true. Determining type
+            # in a loosely typed language is a hack process.
+            if(exists $type_cache{$meta})
+            {
+               $type = $type_cache{$meta};
+            }
+            else {
+               CHECK: {
+                  if($meta =~ /_(?:avg|sum|min|max|p)$/)  { $type = 'n'; last CHECK; }
+                  if($x->{$meta} =~ /[^\d\.]/)            { $type = 's'; last CHECK; }
+                  if($meta eq 'db')                       { $type = 's'; last CHECK; }
+
+                  # default
+                  $type = 'n';
+               }
+
+               $type_cache{$meta} = $type;
+            }
+
+            goto DELETE_QUERY if !passes_meta_filter($meta, $x->{$meta}, $type);
+         }
+
+         # Reapply any statement filters
+         if($op{sf})
+         {
+            if($x->{sample} !~ /^\s*\(?(\w+)\s+/)  # extract SQL statement type
+            {
+               # This shouldn't happen in a replay
+               d("refilter_replay: FAIL NON-SQL statement: $x->{sample}\n") if $op{debug};
+               goto DELETE_QUERY;
+            }
+
+            goto DELETE_QUERY if !passes_statement_filter($1);
+         }
+
+         # Reapply grep
+         if($op{grep} && ($x->{sample} !~ /$op{grep}/io))
+         {
+            d("refilter_replay: stmt FAILS grep: $x->{sample}\n") if $op{debug};
+            goto DELETE_QUERY;
+         }
+      } # foreach $meta (keys %$x)
+
+      next;
+
+      DELETE_QUERY:
+      delete($$q_h{$q});
+
+   } # foreach $q (keys %$q_h)
+}
+
+sub calc_nthp
+{
+   my $q_h = shift;  # reference to hash with queries
+
+   my @s;
+   my $n;
+   my $q;
+   my $x;
+   my $meta_name;
+   my $base_meta_name;
+
+   $op{nthp}  ||= 95;
+   $op{nthpm} ||= 10;
+
+   d("calc_nthp: nthp $op{nthp} nthpm $op{nthpm}\n") if $op{debug};
+
+   foreach $q (keys %$q_h)
+   {
+      next if $$q_h{$q}->{c_sum} == 1; # do not calc nthp for 1-count stmts
+
+      foreach $meta_name (keys %{$$q_h{$q}})
+      {
+         next unless $meta_name =~ /([a-z]+)_all$/;  # only arrays (t_all, l_all, ext_all, etc.)
+
+         $base_meta_name = $1;
+
+         $x = \@{$$q_h{$q}->{$meta_name}};  # refer x to the meta's array of values
+
+         next if scalar @$x < $op{'nthpm'}; 
+
+         @s = sort { $a <=> $b } @$x;            # sort values in array
+         $n = ((scalar @$x) * $op{nthp}) / 100;  # calc cut-off percent (default: 95)
+         @s = splice(@s, 0, $n);                 # remove elements from array after cut-off percent
+
+         $$q_h{$q}->{"$base_meta_name\_min_nthp"} = $s[0];
+         $$q_h{$q}->{"$base_meta_name\_max_nthp"} = $s[$n - 1];
+         $$q_h{$q}->{"$base_meta_name\_avg_nthp"} = avg(0, \@s, \$n);
+         $$q_h{$q}->{"$base_meta_name\_sum_nthp"} = $n;
+      }
+   }
+}
+
+sub calc_dist
+{
+   my $q_h = shift;  # reference to hash with queries
+
+   my ($n, $t, %y, $z, $x, $q, $meta);
+   my $base_meta_name;
+
+   $op{dmin} ||= 5;
+   $op{dtop} ||= 10;
+
+   d("calc_dist: dmin $op{dmin} dtop $op{dtop}\n") if $op{debug};
+
+   foreach $q (keys %$q_h)
+   {
+      next if $$q_h{$q}->{c_sum} == 1; # do not calc dist for 1-count stmts
+
+      foreach $meta (keys %{$$q_h{$q}})
+      {
+         next unless $meta =~ /(\w+)_all$/;  # t_all, l_all, ext_all, etc.
+
+         $base_meta_name = $1;
+
+         $x = \@{$$q_h{$q}->{$meta}};  # refer x to the meta's array of values
+
+         $z = scalar @$x;
+         next if $z < 2;
+
+         $n = 0;
+         $t = 0;
+         %y = ();
+
+         map { $y{$_}++ } @$x;                         # Count occurances of each unique value
+         foreach(keys %y) { $y{$_} = p($y{$_}, $z); }  # Save percentage of each unqiue value
+
+         foreach( sort { $y{$b} <=> $y{$a} } keys %y )  # Sort desc by percentage of each unqiue value
+         {
+            $t += $y{$_};
+            last if ++$n > $op{dtop};    # Stop if printed number of percentages > max allowed
+            last if $y{$_} < $op{dmin};  # Stop if percentage < minimum percentage
+            push @{$$q_h{$q}->{"$base_meta_name\_dist"}}, "$y{$_}\%:$_";
+         }
+
+         # Total percentage for which all the saved distributions percentages account
+         push @{$$q_h{$q}->{"$base_meta_name\_dist"}}, "- represents $t\% of total";
+      }
+   }
+}
+
+sub EXPLAIN_queries
+{
+   d("EXPLAIN_queries\n") if $op{debug};
+
+   my $q_h = shift;  # reference to hash with queries
+
+   my $row;
+   my @rows;
+   my $col;
+   my ($x, $q);
+   my ($i, $j);
+   my $select_query;
+
+   connect_to_MySQL();  # safe to call multiple times; it will just return
+                        # if we're already connected to the MySQL server
+
+   foreach $q (keys %$q_h)
+   {
+      $x = $$q_h{$q};
+
+      $x->{EXPLAIN_err} = 0;
+      $x->{rp} = -1;
+      $x->{rr} = -1;
+
+      if($x->{sample} !~ /^SELECT/i)
+      {
+         my $qr = new QueryRewriter;
+         $select_query = $qr->convert_to_select($x->{sample});
+         if ( $select_query !~ /^SELECT/i ) {
+            $x->{EXPLAIN_err} = "Cannot convert to a SELECT statement";
+            next;
+         }
+      }
+      else {
+         $select_query = $x->{sample};
+      }
+
+      if(!$x->{db})
+      {
+         if(!$op{db})
+         {
+            # See if query has qualified table names which will allow it
+            # to be EXPLAINed without setting the db
+            eval {
+               $query = $dbh->prepare("EXPLAIN $select_query");
+               $query->execute();
+            };
+            if ( $EVAL_ERROR ) {
+               $x->{EXPLAIN_err} = "Unknown database and no qualified table names";
+               next;
+            }
+            else {
+               goto PARSE_EXPLAIN;
+            }
+         }
+         else
+         {
+            foreach(keys %db)
+            {
+               $dbh->do("USE $_;");
+               $query = $dbh->prepare("EXPLAIN $select_query");
+               $query->execute();
+               next if $DBI::err;
+
+               $x->{db} = $_;
+               last;
+            }
+
+            if(!$x->{db})
+            {
+               $x->{EXPLAIN_err} = "Unknown database and no given databases work";
+               next;
+            }
+         }
+      }
+
+      $query = $dbh->prepare("USE $x->{db};");
+      $query->execute();
+      $x->{EXPLAIN_err} = $DBI::errstr and next if $DBI::err;
+
+      $query = $dbh->prepare("EXPLAIN $select_query");
+      $query->execute();
+      $x->{EXPLAIN_err} = $DBI::errstr and next if $DBI::err;
+
+      PARSE_EXPLAIN:
+      
+      $x->{EXPLAIN} = [] if $op{ex};
+      $x->{tcount}  = '' if $extras{tcount};
+      $x->{TSCHEMA} = [] if $extras{tschema};
+
+      while($row = $query->fetchrow_hashref())
+      {
+         push @rows, ($row->{rows} ? $row->{rows} : 0)
+            if $op{ex};
+
+         for($j = 0; $j < $query->{NUM_OF_FIELDS}; $j++)
+         {
+            $col = $query->{NAME}->[$j];
+
+            if ( $op{ex} ) {
+               push @{$x->{EXPLAIN}}, $col;
+               push @{$x->{EXPLAIN}}, ($row->{$col} ? $row->{$col} : '');
+            }
+
+         }
+      }
+
+      if ( $op{ex} ) {
+         for($i = 0, $j = 1; $i < $query->rows; $i++) { $j *= $rows[$i]; }
+         $x->{rp} = $j; # Rows produced
+         $x->{rr} = calc_rows_read(\@rows);
+      }
+
+      if ( $extras{tcount} || $extras{tschema} ) {
+         my $tbls = parse_table_aliases(get_table_ref($select_query));
+         foreach my $tbl ( keys %$tbls ) {
+            next if $tbl eq 'DATABASE';
+            my $db = $x->{db};
+            if (    exists $tbls->{DATABASE}
+                 && exists $tbls->{DATABASE}->{$tbl} ) {
+               $db = $tbls->{DATABASE}->{$tbl};
+            }
+
+            if ( $extras{tcount} ) {
+               my $n = make_short(get_row_count($dbh, $db, $tbls->{$tbl}));
+               $x->{tcount} .= "$tbls->{$tbl}:$n ";
+            }
+            if ( $extras{tschema} ) {
+               my $ddl = get_create_table($dbh, $db, $tbls->{$tbl});
+               if ( $ddl ) {
+                  push @{$x->{TSCHEMA}},
+                     ($ddl->[0] eq 'view' ? '(VIEW) ' : '')
+                     . $ddl->[1];
+               }
+               else {
+                  $x->{TSCHEMA} = 'Could not get table schemas';
+               }
+            }
+         }
+      }
+
+   }
+}
+
+sub get_create_table {
+   my ( $dbh, $db, $tbl ) = @_;
+   my $ddl;
+
+   my $sql = '/*!40101 SET @OLD_SQL_MODE := @@SQL_MODE, '
+      . '@@SQL_MODE := REPLACE(REPLACE(@@SQL_MODE, "ANSI_QUOTES", ""), ",,", ","), '
+      . '@OLD_QUOTE := @@SQL_QUOTE_SHOW_CREATE, '
+      . '@@SQL_QUOTE_SHOW_CREATE := 1 */';
+   $dbh->do($sql);
+
+   $dbh->do("USE $db") if defined $db;
+
+   $sql = "SHOW CREATE TABLE $tbl";
+   my $href;
+   eval {
+      $href = $dbh->selectrow_hashref($sql);
+   };
+   if ( !$DBI::err ) {
+      $sql = '/*!40101 SET @@SQL_MODE := @OLD_SQL_MODE, '
+         . '@@SQL_QUOTE_SHOW_CREATE := @OLD_QUOTE */';
+      $dbh->do($sql);
+
+      my ($key) = grep { m/create table/i } keys %$href;
+      if ( $key ) {
+         $ddl = [ 'table', $href->{$key} ];
+      }
+      else {
+         ($key) = grep { m/create view/i } keys %$href;
+         $ddl = [ 'view', $href->{$key} ];
+      }
+   }
+
+   return $ddl;
+}
+
+sub get_row_count {
+   my ( $dbh, $db, $tbl ) = @_;
+   my $n = -1;
+
+   $dbh->do("USE $db") if defined $db;
+
+   my $sql = "SELECT COUNT(*) AS n FROM $tbl";
+   my $href;
+   eval {
+      $href = $dbh->selectrow_hashref($sql);
+   };
+   if ( !$DBI::err ) {
+      $n = $href->{n};
+   }
+
+   return $n;
+}
+
+sub parse_table_aliases
+{
+   my $table_ref = shift;
+   my %table_aliases;
+   my @tables;
+
+   $table_ref =~ s/\n/ /g;
+   $table_ref =~ s/`//g; # Graves break database discovery
+
+   d("parse_table_aliases: table ref = '$table_ref'\n") if $op{debug};
+
+   if($table_ref =~ / (:?straight_)?join /i)
+   {
+      $table_ref =~ s/ join /,/ig;
+      while($table_ref =~ s/ (?:inner|outer|cross|left|right|natural),/,/ig) { }
+      $table_ref =~ s/ using \(.+?\)//ig;
+      $table_ref =~ s/ on \([\w\s=.,]+\),?/,/ig;
+      $table_ref =~ s/ on [\w\s=.]+,?/,/ig;
+      $table_ref =~ s/ straight_join /,/ig;
+   }
+
+   @tables = split /,/, $table_ref;
+
+   for(@tables)
+   {
+      if(/\s*(\w+)\s+AS\s+(\w+)\s*/i)
+      {
+         $table_aliases{$2} = $1;
+      }
+      elsif(/^\s*(\w+)\s+(\w+)\s*$/)
+      {
+         $table_aliases{$2} = $1;
+      }
+      elsif(/^\s*(\w+)+\s*$/)
+      {
+         # Not an alias but we parse/save it anyway to be polite
+         $table_aliases{$1} = $1;
+      }
+      elsif(/^(\S+)\.(\S+)/) {
+         $table_aliases{$2} = $2;
+         $table_aliases{DATABASE}->{$2} = $1;
+      }
+   }
+
+   if($op{debug})
+   {
+      for(keys %table_aliases)
+      {
+         print "parse_table_aliases: '$_' is really '$table_aliases{$_}'\n";
+      }
+   }
+
+   return \%table_aliases;
+}
+
+sub get_table_ref
+{
+   my $q = shift;
+   my $table_ref;
+
+   $table_ref = 0;
+
+   if($q =~ /from\s+(.+?)(?:where|order|limit|having)+.+/is) 
+   {
+      $table_ref = $1;
+   }
+   elsif($q =~ /from\s+(.+?);?$/is)
+   {
+      # This handles queries like "SELECT COUNT(id) FROM table;"
+      chomp($table_ref = $1);
+   }
+
+   return $table_ref;
+}
+
+sub time_each_query
+{
+   d("time_each_query\n") if $op{debug};
+
+   my $q_h = shift;  # reference to hash with queries
+
+   my @t;
+   my ($q, $x);
+   my $error;
+
+   foreach $q (keys %$q_h)
+   {
+      $x = $$q_h{$q};
+
+      $x->{exec}     = -1;
+      $x->{exec_sum} = -1;
+
+      if(!$x->{db})
+      {
+         if($op{db})
+         {
+            connect_to_MySQL();  # safe to call multiple times; it will just return
+                                 # if we're already connected to the MySQL server
+
+            foreach(keys %db)
+            {
+               $dbh->do("USE $_;");
+               $query = $dbh->prepare($x->{sample});
+               $query->execute();
+               next if $DBI::err;
+
+               $x->{db} = $_;
+               last;
+            }
+         }
+
+         if(!$x->{db})
+         {
+            d("time_each_query: stmt has no db: $q\n") if $op{debug};
+            next;
+         }
+      }
+      else
+      {
+         connect_to_MySQL();
+         $dbh->do("USE $x->{db};");
+      }
+
+      $error = time_profile(0, [$x->{sample}], \@t);
+
+      if(!$error)
+      {
+         $x->{exec}     = avg($op{avg}, \@t);
+         $x->{exec_sum} = $x->{c_sum} * $x->{exec};
+      }
+      else
+      {
+         d("time_each_query: time_profile() returned a MySQL error: $error\n") if $op{debug};
+      }
+   }
+}
+
+sub time_profile
+{
+   my $print = shift;  # print progress indicators
+   my $q     = shift;  # reference to array with queries
+   my $times = shift;  # reference to array in which to save exection times  
+
+   my $n;
+   my $perc;
+   my ($i, $j);
+   my ($t0, $t1, $t);
+   my $r;
+
+   $n    = $op{avg};
+   $perc = 0;
+   $i    = 1;
+   $j    = '25', $perc = int $n / 4 if $op{percent} || $n >= 20; # Percentage interval
+
+   connect_to_MySQL();  # safe to call multiple times; it will just return
+                        # if we're already connected to the MySQL server
+
+   $dbh->do("FLUSH QUERY CACHE;") if $op{'flush-qc'};
+
+   while($i++ <= $n)
+   {
+      if($print) {
+         if($perc) {
+            if($i == $perc) {
+               print "$j\% ";
+               $j += 25;
+               $perc += $perc;
+            }
+         }
+         else { print $i - 1 . ' '; }
+      }
+
+      $t0 = [gettimeofday];
+      foreach(@$q)
+      {
+         $r = $dbh->do($_);
+         return $DBI::errstr if !defined $r;
+      }
+      $t1 = [gettimeofday];
+      $t  = tv_interval($t0, $t1);
+      push(@$times, $t);
+   }
+
+   return 0;
+}
+
+sub calc_rows_read
+{
+   my $rows = shift;  # array ref
+
+   my ($n_rows, $total);
+   my ($i, $j, $x);
+
+   $n_rows = scalar @$rows;
+   $total  = $$rows[0];
+
+   for($i = 1; $i < $n_rows; $i++)
+   {
+      for($j = 1, $x = $$rows[0]; $j <= $i; $j++) { $x *= $$rows[$j]; }
+      $total += $x;
+   }
+
+   return $total;
+}
+
+sub sort_and_prune
+{
+   my $top;
+   my $sort;
+
+   $op{top}  ||= 10;
+   $op{sort} ||=($op{lt} eq 'slow' || $op{lt} eq 'msl' ? 't_sum' : 'c_sum');
+
+   $top = $op{top};
+
+   d("sort_and_prune: top $op{top} sort $op{sort}\n") if $op{debug};
+
+   foreach (sort { $$q_h{$b}->{$op{sort}} <=> $$q_h{$a}->{$op{sort}} } keys(%$q_h))
+   {
+      $$q_h{$_}->{sort_rank} = ($op{top} - $top + 1);
+      last if !--$top;
+   }
+
+   foreach(keys %$q_h) { delete $$q_h{$_} if !exists $$q_h{$_}->{sort_rank}; }
+}
+
+sub make_reports
+{
+   d("make_reports\n") if $op{debug};
+
+   standard_report(\@headers, \@header_vals, \@formats, \@format_vals)
+                         if exists $r{standard};
+
+   time_all_report()     if exists $r{'time-all'};      
+   print_unique_report() if exists $r{'print-unique'};
+   print_all_report()    if exists $r{'print-all'};
+   dump_report()         if exists $r{dump};
+}
+
+sub standard_report
+{
+   d("print_standard_report\n") if $op{debug};
+
+   my $headers     = shift;
+   my $header_vals = shift;
+   my $formats     = shift;
+   my $format_vals = shift;
+
+   my $format_conditional;
+   my $coded_value;
+   my $value;
+   my $value_resolved;
+   my @values;
+   my $q;
+   my $i;
+   my $n;
+   my $x;
+
+   $q = '';
+
+   for($i = 0; $i < scalar @$headers; $i++)
+   {
+      print "\n" and next if !$$headers[$i];
+
+      @values = ();
+
+      foreach $coded_value (@{$$header_vals[$i]})
+      {
+         resolve_coded_value(\$coded_value, \$q, \$value);
+         push @values, $value;
+      }
+
+      # Print all values for this header line.
+      $values[$#values] =~ s/[\s\n]{1,}$//;  # remove trailing spaces and newlines from final value
+      printf($$headers[$i], @values);
+   }
+
+   foreach $q (sort { $$q_h{$a}->{sort_rank} <=> $$q_h{$b}->{sort_rank} } keys(%$q_h))
+   {
+      $x = $$q_h{$q};
+
+      for($i = 0; $i < scalar @$formats; $i++)
+      {
+         print "\n" and next if !$$formats[$i];
+
+         $format_conditional = (exists $conditional_formats{$$formats[$i]} ? 1 : 0);
+         @values = ();
+
+         foreach $coded_value (@{$$format_vals[$i]})
+         {
+            $value_resolved = resolve_coded_value(\$coded_value, \$q, \$value);
+            last if ($format_conditional && !$value_resolved);
+            push @values, $value;
+         }
+
+         # Print all values for this format line.
+         if(!$format_conditional || $value_resolved)
+         {
+            $values[$#values] =~ s/[\s\n]{1,}$//;  # remove trailing spaces and newlines from final value
+            printf($$formats[$i], @values);
+         }
+      }
+   }
+}
+
+sub dump_report
+{
+   d("dump_report\n") if $op{debug};
+
+   $Data::Dumper::Indent    = 1;
+   $Data::Dumper::Sortkeys  = 1;
+   $Data::Dumper::Quotekeys = 0;
+
+   print Dumper($q_h), "\n";
+   print Dumper(\%u_h), "\n";
+   print Dumper(\%g_t), "\n";
+}
+
+sub time_all_report
+{
+   my @t;
+   my $total;
+   my $avg;
+   my $error;
+
+   local $| = 1;
+
+   print "\n_______________________________________________ All Queries Execution Time ___\n";
+   print "Averaging over $op{avg} runs: ";
+
+   $error = time_profile(1, $q_a, \@t);
+
+   if(!$error)
+   {
+      $avg = avg($op{avg}, \@t, \$total);
+
+      print "\nTotal All Queries: ", format_u_time($total), "\n"; 
+      print "Average Per-Query: ", format_u_time($avg), "\n\n";
+   }
+   else
+   {
+      print "\nMySQL error: $error\n\n";
+   }
+}
+
+sub print_all_report
+{
+   foreach(@all_queries) { print "$_\n\n"; }
+}
+
+sub print_unique_report
+{
+   foreach(keys %$q_h) { print "$$q_h{$_}->{sample}\n\n"; }
+}
+
+sub resolve_coded_value
+{
+   my $coded_value = shift;  # scalar ref
+   my $q           = shift;  # hash ref
+   my $save_value  = shift;  # scalar ref
+
+   my $value;
+   my $code;
+   my $resolved;
+   my $ref;
+
+   ($value, $code) = ($$coded_value =~ /(\w*)(?::(\w+))?/ ? ($1, $2) : ('', ''));
+
+   $resolved = 1;
+
+   # First find which actual value the value name refers to. Most value names
+   # will refer to a meta-property name in %q_h. 'query' and 'n' are special
+   # case: query is the abstracted statment (the key to %q_h), and n is the
+   # statement's number in the sort order. Finally, a value name might refer
+   # to a grand total value in %g_t. 
+
+   if($$q && exists $$q_h{$$q}->{$value})
+   {
+      $ref = ref($$q_h{$$q}->{$value});
+
+      SWITCH: {
+         if(!$ref)            { $value = $$q_h{$$q}->{$value};      goto FORMAT_VALUE; }
+         if($ref eq 'ARRAY')  { $value = "@{$$q_h{$$q}->{$value}}"; goto SAVE_VALUE;   }
+      }
+   }
+
+   $value = $$q, goto FORMAT_VALUE if $value eq 'query';
+   $value = $g_t{$value}, goto FORMAT_VALUE if exists $g_t{$value};
+   $value = $total_queries, goto FORMAT_VALUE if $value eq 'total_queries';
+   $value = $total_unique_queries, goto FORMAT_VALUE if $value eq 'total_unique_queries';
+   $value = $total_unique_users, goto FORMAT_VALUE if $value eq 'total_unique_users';
+   $value = stmt_users_summary($q),goto SAVE_VALUE if $value eq 'users';
+   $value = EXPLAIN_summary($q, \$resolved),  goto SAVE_VALUE if $value eq 'explain';
+   $value = schema_summary($q, \$resolved),   goto SAVE_VALUE if $value eq 'tschema';
+   $value = $op{$value}, goto SAVE_VALUE  if ($code && $code eq 'op' && exists $op{$value});
+   $value = "@ARGV", goto SAVE_VALUE if $value eq 'logs';
+
+   # If no actual value was found, use zero. This probably indicates
+   # a misspell in the report format file.
+   $value    = 0;
+   $resolved = 0;
+
+   # Format the value if there was a format code after its name (:code).
+   FORMAT_VALUE:
+   if($code)
+   {
+      SWITCH: {
+         if($code eq 'micro')  { $value = format_u_time($value);  last SWITCH; }
+         if($code eq 'short')  { $value = make_short($value);     last SWITCH; }
+         if($code eq 'cap')    { $value = beautify($value);       last SWITCH; }
+      }
+   }
+
+   SAVE_VALUE:
+   $$save_value = $value;
+
+   return $resolved;
+}
+
+sub parse_report_format
+{
+   my $rff                 = shift; # report format file or 0 for default/internal
+   my $headers             = shift;
+   my $header_vals         = shift;
+   my $formats             = shift;
+   my $format_vals         = shift;
+   my $conditional_formats = shift;
+
+   my @report_format;
+   my $line;
+   my $i;
+   my @x;
+
+   if($rff)
+   {
+      if(!open RFF, "< $rff")
+      {
+         print("Cannot open report format file '$rff': $!\n");
+         exit;
+      }
+
+      d("parse_report_format: reading '$rff'\n") if $op{debug};
+      @report_format = <RFF>;
+      close RFF;
+   }
+   else
+   {
+      d("parse_report_format: using default/internal report format\n") if $op{debug};
+      @report_format = map { $_ .= "\n"; } split "\n", ReportFormats::get_report_format($op{lt});
+   }
+
+   $i = 0;
+
+   # The first lines of the report format file until the occurrence
+   # of a line beginning with HEADER can contain addtional command
+   # line options.
+   while($line = $report_format[$i++])
+   {
+      last if $line =~ /^HEADER/;
+      next if $line =~ /^$/;
+      @x = split ' ', $line;
+      push @ARGV, @x if scalar @x;
+      get_options();
+   }
+
+   # Subsequent lines until the occurrence of a line beginning with
+   # REPORT are header lines: lines printed only once at the
+   # beginning of the report.
+   while($line = $report_format[$i++])
+   {
+      last if $line =~ /^REPORT/;
+
+      if($line =~ /^$/)
+      {
+         push @$headers, 0;
+         push @$header_vals, 0;
+         next;
+      }
+
+      push @$headers, $line;         # save header line
+      $line = $report_format[$i++];  # read value line after header line
+      chomp $line;
+      @x = split ' ', $line;
+
+      goto BLANK_VALUE_LINE if (!$line || !scalar @x);
+
+      push @$header_vals, [@x];  # save header vals
+   }
+
+   # Read report lines
+   while($line = $report_format[$i++])
+   {
+      if($line =~ /^$/)
+      {
+         push @$formats, 0;
+         push @$format_vals,  0;
+         next;
+      }
+
+      if(substr($line, 0, 1) eq '?')  # conditional report format line
+      {
+         $line =~ s/^\?//;
+         $$conditional_formats{$line} = 1;
+      }
+
+      push @$formats, $line;         # save format line
+      $line = $report_format[$i++];  # read value line after format line
+      chomp $line;
+      @x = split ' ', $line;
+
+      goto BLANK_VALUE_LINE if (!$line || !scalar @x);
+
+      push @$format_vals, [@x];  # save format vals
+   }
+
+   help_and_exit("The standard report format file '$rff' appears to be corrupt because it has no report format lines.\n") if(!@$formats);
+
+   return;
+
+   BLANK_VALUE_LINE:
+   $i--;
+   help_and_exit("The standard report format is invalid because line $i is blank but values were expected.\n");
+}
+
+sub save_replay
+{
+   my $outfile = shift;
+
+   if(!store($q_h, $outfile))
+   {
+      d("save_replay: store() failed on file '$outfile'\n") if $op{deubg};
+      return;
+   }
+}
+
+sub beautify
+{
+   my $q = shift;
+   my $l;
+   my $p;
+
+   # Run straight through $q grabbing each full word (m/\b(\w+)\b/g).
+   # If the word exists in the list of general SQL and MySQL-specific
+   # reserved words it gets capitalized. While we're at it, we count
+   # the number of occurrences of each reserved word
+   # ($MySQL_reserved_words{$1}++). We'll count a lot of words we
+   # don't care about (AND, OR), but doing so poses no real overhead.
+
+   while($q =~ m/\b(\w+)\b/g)
+   {
+      $l = length $1;
+      next if $l == 1;
+
+      $p = pos($q);
+
+      if(exists $MySQL_reserved_words{$1})
+      {
+         $p = pos($q);
+         $MySQL_reserved_words{$1}++;
+         substr($q, $p - $l, $l, uc($1));
+         pos($q) = $p;
+      }
+   }
+
+   return $q;
+}
+
+sub stmt_users_summary
+{
+   my $q = shift;  # scalar ref
+
+   my $x;
+   my $s;
+   my $s_p;
+   my $u_c;
+   my $u_p;
+
+   $s = "\n";
+
+   $x = $$q_h{$$q};
+
+   foreach( sort { $x->{users}->{$b} <=> $x->{users}->{$a} } keys %{$x->{users}} )
+   {
+      $s_p = p($x->{users}->{$_}, $x->{c_sum});
+      $u_c = ($u_h{$_}->{c} ? $u_h{$_}->{c} : '');
+      $u_p = ($u_h{$_}->{p} ? $u_h{$_}->{p} : '');
+
+      $s .= "\t$_ : $s_p\% ($x->{users}->{$_}) of query, $u_p\% ($u_c) of all users\n";
+   }
+
+   return $s;
+}
+
+sub EXPLAIN_summary
+{
+   my $q        = shift;  # scalar ref
+   my $resolved = shift;  # scalar ref
+
+   my $x;
+   my $s;
+   my $i;
+
+   $x = $$q_h{$$q};
+
+   $$resolved = 1;
+
+   if(!exists $x->{EXPLAIN_err})
+   {
+      $$resolved = 0;
+      return "EXPLAIN was not ran (--explain option was not used)";
+   }
+
+   return $x->{EXPLAIN_err} if $x->{EXPLAIN_err};
+
+   if ( $op{ex} ) {
+      $s = "$x->{rp} produced, $x->{rr} read\n";
+
+      for($i = 0; $i < (scalar @{$x->{EXPLAIN}}); $i += 2)
+      {
+         $s .= "\t$x->{EXPLAIN}[$i]: $x->{EXPLAIN}[$i + 1]\n";
+         $s .= "\n" if $x->{EXPLAIN}[$i] eq 'Extra';
+      }
+   }
+   else {
+      $$resolved = 0;
+      return "\n";
+   }
+
+   return $s;
+}
+
+sub schema_summary
+{
+   my $q        = shift;  # scalar ref
+   my $resolved = shift;  # scalar ref
+   my $s;
+
+   my $x = $$q_h{$$q};
+
+   if ( $extras{tschema} ) {
+      $$resolved = 1;
+      if ( ref $x->{TSCHEMA} eq 'ARRAY' ) {
+         $s = "\n";
+         foreach my $schema ( @{ $x->{TSCHEMA} } ) {
+            $s .= "$schema\n\n";
+         }
+      }
+      else {
+         $s = $x->{TSCHEMA};
+      }
+   }
+   else {
+      $$resolved = 0;
+   }
+
+   return $s;
+}
+
+sub avg
+{
+   my $avg     = shift;  # scalar
+   my $x       = shift;  # arrray ref
+   my $set_sum = shift;  # scalar ref
+
+   my $sum;
+
+   $avg = scalar @$x if $avg == 0;
+   $sum = 0;
+
+   foreach(@$x) { $sum += $_; }
+
+   $$set_sum = $sum if $set_sum;
+
+   return ($sum / $avg);
+}
+
+sub p
+{
+   my ($is, $of) = @_;
+   return sprintf('%.2f', ($is * 100) / ($of ||= 1));
+}
+
+sub format_u_time
+{
+   my $t = shift;  # unformatted time
+
+   my $f;         # formatted microsoft time
+   my $u_symbol;
+
+   $u_symbol = ($op{'microsecond-symbol'} ? $op{'microsecond-symbol'} : $u);
+
+   $t = 0 if $t < 0;
+
+   $t = sprintf('%.6f', $t);  # fixes too much percision: 0.0000091
+                              # would fall into else {}
+
+   if($t > 0 && $t <= 0.000999)
+   {
+      $f = sprintf('%d %s', ($t * 1000000), $u_symbol);
+   }
+   elsif($t >= 0.001000 && $t <= 0.999999)
+   {
+      $f = sprintf('%.3f', $t * 1000);
+      $f *= 1;  # hack to remove trailing zeros
+      $f .= ' ms';
+   }
+   elsif($t >= 1)
+   {
+      $f = sprintf('%.6f', $t);
+      $f *= 1;  # hack to remove trailing zeros
+      $f .= ' s';
+   }
+   else
+   {
+      $f = 0;  # $t should = 0 at this point
+   }
+
+   return $f;
+}
+
+sub make_short
+{
+   my $number = shift;
+   my $n = 0;
+   my $p = 2;
+
+   while ($number > 999) { $number /= 1000; $n++; }
+   $p = 0 if !$n;  # if number < 1000
+   return sprintf "%.${p}f%s", $number, ('','k','M','G','T','P','E')[$n];
+}
+
+sub d
+{
+   my $debug_message = shift;
+   print "--- $debug_message";
+}
+
+sub get_options
+{
+   my $ops_ok;
+   
+   $ops_ok = GetOptions(
+      \%op,
+      "user=s",
+      "password:s",
+      "host=s",
+      "port=s",
+      "socket=s",
+      "no-mycnf",
+      "mycnf=s",
+      "db|D|databases=s",
+      "help|?",
+      "lt|log-type=s", 
+      "uf|udl-format=s",
+      "sort=s",
+      "flush-qc",
+      "avg|n=i",
+      "percent",
+      "top=n",
+      "mf|meta-filter=s",
+      "sf|statement-filter=s",
+      "grep=s",
+      "dist",
+      "dmin|dist-min-percent=i",
+      "dtop|dist-top=i",
+      "nthp|nth-percent:i",
+      "nthpm|nthp-min-values=i",
+      "ex|explain",
+      "te|time-each-query",
+      "rf|report-format=s",
+      "reports|R=s",
+      "silent",
+      "post-parse-replay=s",
+      "post-analyses-replay=s",
+      "post-sort-replay=s",
+      "replay=s",
+      "Av|abstract-values",
+      "Ai|abstract-in=i",
+      "atomic-statements",
+      "dont-save-meta-values",
+      "save-all-values",
+      "db-inheritance",
+      "microsecond-symbol|us=s",
+      "debug",
+      "extra|x=s",
+   );
+
+   help_and_exit() if !$ops_ok;
+}
+
+sub set_MySQL_reserved_words
+{
+   %MySQL_reserved_words = qw(
+      add 0              all 0            alter 0
+      analyze 0          and 0            as 0
+      asc 0              asensitive 0     before 0
+      between 0          bigint 0         binary 0
+      blob 0             both 0           by 0
+      call 0             cascade 0        case 0
+      change 0           char 0           character 0
+      check 0            collate 0        column 0
+      condition 0        constraint 0     continue 0
+      convert 0          create 0         cross 0
+      current_date 0     current_time 0   current_timestamp 0
+      current_user 0     cursor 0         database 0
+      databases 0        day_hour 0       day_microsecond 0
+      day_minute 0       day_second 0     dec 0
+      decimal 0          declare 0        default 0
+      delayed 0          delete 0         desc 0
+      describe 0         deterministic 0  distinct 0
+      distinctrow 0      div 0            double 0
+      drop 0             dual 0           each 0
+      else 0             elseif 0         enclosed 0
+      escaped 0          exists 0         exit 0
+      explain 0          false 0          fetch 0
+      float 0            float4 0         float8 0
+      for 0              force 0          foreign 0
+      from 0             fulltext 0       grant 0
+      group 0            having 0         high_priority 0
+      hour_microsecond 0 hour_minute 0    hour_second 0
+      if 0               ignore 0         in 0
+      index 0            infile 0         inner 0
+      inout 0            insensitive 0    insert 0
+      int 0              int1 0           int2 0
+      int3 0             int4 0           int8 0
+      integer 0          interval 0       into 0
+      is 0               iterate 0        join 0
+      key 0              keys 0           kill 0
+      leading 0          leave 0          left 0
+      like 0             limit 0          lines 0
+      load 0             localtime 0      localtimestamp 0
+      lock 0             long 0           longblob 0
+      longtext 0         loop 0           low_priority 0
+      match 0            mediumblob 0     mediumint 0
+      mediumtext 0       middleint 0      minute_microsecond 0
+      minute_second 0    mod 0            modifies 0
+      natural 0          not 0            no_write_to_binlog 0
+      null 0             numeric 0        on 0
+      optimize 0         option 0         optionally 0
+      or 0               order 0          out 0
+      outer 0            outfile 0        precision 0
+      primary 0          procedure 0      purge 0
+      read 0             reads 0          real 0
+      references 0       regexp 0         release 0
+      rename 0           repeat 0         replace 0
+      require 0          restrict 0       return 0
+      revoke 0           right 0          rlike 0
+      schema 0           schemas 0        second_microsecond 0
+      select 0           sensitive 0      separator 0
+      set 0              show 0           smallint 0
+      soname 0           spatial 0        specific 0
+      sql 0              sqlexception 0   sqlstate 0
+      sqlwarning 0       sql_big_result 0 sql_calc_found_rows 0
+      sql_small_result 0 ssl 0            starting 0
+      straight_join 0    table 0          terminated 0
+      then 0             tinyblob 0       tinyint 0
+      tinytext 0         to 0             trailing 0
+      trigger 0          true 0           undo 0
+      union 0            unique 0         unlock 0
+      unsigned 0         update 0         usage 0
+      use 0              using 0          utc_date 0 
+      utc_time 0         utc_timestamp 0  values 0
+      varbinary 0        varchar 0        varcharacter 0
+      varying 0          when 0           where 0
+      while 0            with 0           write 0
+      xor 0              year_month 0     zerofill 0
+      sum 0              min 0            max 0
+      count 0            against 0        sql_no_cache 0
+      reset 0            master 0         slave 0
+      concat 0           unix_timestamp 0 round 0
+      rand 0);
+}
+
+###############################################################################
+# END mysqlsla                                                                #
+###############################################################################

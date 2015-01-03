@@ -1,0 +1,130 @@
+mysqlsla Changes
+http://hackmysql.com/mysqlsla
+
+v2.03 Nov 10 2008
+- Changed: --log-type (-lt) is now optional: the log type will be automatically
+  detected using the first log file given (-lt can still be used to force
+  a log type)
+- Changed: UPDATE, INSERT, REPLACE and DELETE statements are now converted to
+  SELECT statements in order to --explain them (thanks to using the Maatkit
+  QueryRewriter common module.)
+- Fixed: --explain does not require knowing the query's database if the query
+  uses qualified table names (e.g. database.table)
+- Added: --extra (-x) [tschema|tcount] option
+
+v2.02 (unreleased)
+- Fixed: exec_sum was not calculated correctly
+
+v2.01 Jul 31 2008 (unreleased)
+- Fixed: handles "short" msl patched slow logs, where the only extra info is
+  Thread_id and Schema (Thanks Vadim)
+- Changed: given above fix, lines in msl report for QC Hit, Filesort, etc. are
+  now conditionalized
+
+v2.00 Jul 12 2008
+- Release (v1 branch retired); see http://hackmysql.com/mysqlsla
+  for documentation and guides
+
+v1.8 Apr 17 2008
+- --only-hosts did not work for general logs
+- Multi-line comments using /* */ caused everything after the first line
+  to be ignored in raw logs
+- Change user commands were not handled in general logs
+- CHANGE, DROP and RESET statements were filtered out
+- A certain variant of the Connect command in general logs was not handled
+- A few more SQL capitalization/beautifications were added
+                        
+v1.7a Nov 8 2007
+- Fixed bug: general logs with connection IDs greater than 10 million
+  were not read in certain cases (thanks Vijay, Kishor).
+- "VALUES(" is now correctly beautified.
+
+v1.7 Oct 27 2007
+- Fixed bug: mnp sub was truncating values > 999 (Thanks Aurimas)
+- Added --milliseconds option
+- Query samples are now saved only if needed, to help reduce memory usage
+  a little bit
+
+v1.6 Oct 14 2007
+- Added --only-databases, --only-users, --only-hosts, --only-ids options.
+  (Thanks to Stephen and others).
+- The mysqlsla tgz now decompresses into its own folder. (Thanks C.J.)
+
+v1.5 Apr 5 2007
+- COMPLETE redesign from v1.3: more simple to use and more informative
+- Log types are now mutually exclusive (but multiple logs of same type
+  can still be combined)
+- Captures USE statements for querys when possible (to make EXPLAIN work)
+- --time-all-queries only works with general and slow logs
+- Nothing is filtered by default
+- Auto-filter -*,+SELECT,+USE enabled for --time-all-queries and
+  --time-each-query unless overriden by --filter
+- Handles compound statements in slow logs
+- Mimicking of mysqldumpslow removed; slow log values now "automatic"
+  when parsing a slow log
+- Removed options: --order, --correlate, --hide, --rows-read, --mysqldumpslow, 
+  --frequency (now called Count)
+- Added options: --debug, --flat, --examples, --sort, --databases,
+  --distribution, --mp, --no-report, --np, --nth-percent
+- Improved log parsing routines
+- Handles DBI/MySQL errors cleanly instead of dumping them to stderr
+- Greatly minimized memory usage (can now parse multi-gig logs without
+  running out of memory)
+
+v1.4 Jan 17 2007
+- Precursor to v1.5; see v1.5 release changes
+
+v1.3 Sep 9 2006
+- Added options: --port, --socket, --beautify, --examples
+- --password now works like it does in mysqlreport
+- Improved parsing for general logs (works w/ prepared statements)
+- Improved abstraction by flattening all statements (lc); hence
+  the need for --beautify
+- Removed all checks on what statements can be ran against the db;
+  rely on --safe instead
+- Added filters: START, SHOW, ROLLBACK, COMMIT
+
+v1.2 May 17 2006
+- Added options: --grep, --filter, --safe, --hide
+- mysqldumpslow-like support for values Time, Lock, Rows sent, and
+  Rows Examined from slow log headers
+- Added options: --slow-time (--st, --at), --slow-total-time (--stt, --t)
+                 --slow-lock (--sl, --al), --slow-total-lock (--stl, --l)
+                 --slow-rows-sent (--srs), --slow-total-rows-sent (--strs)
+                 --slow-rows-examined (--sre, --ar),
+                 --slow-total-rows-examined (--stre, --r)
+                 --mysqldumpslow (--mds)
+- Rewrote parse_general_logs() and parse_raw_logs()
+- Removed parse_slow_logs(); now handled by parse_raw_logs()
+- Fixed IN () abstraction: now works w/ strings and w/ multiple IN () clauses
+- Removed keep_safe_statements(); now handled in parse_ subroutines by filter
+- Stronger stmt flattening: remove all \n, reduces multiple spaces to one
+
+v1.1 Feb 11 2006
+- Complete overhaul...
+- Name changed to mysqlsla, MySQL Statement Log Analyzer
+- Added support for slow logs
+- Improved parsing for general logs
+- Added combined log parsing
+- Changed command line options:
+   Added: --slow, --general, --time-each-query (--te),
+          --time-all-queries (--ta), --order, --correlate, --top,
+          --rows-read (--rr), --percent
+   Removed: --query
+   Changed: --info now --frequency (--fq), --raw-file now --raw
+   Aliased: --explain aliased --ex, --avg alaised --n,
+            --db aliased --Database or -D, --print-queries aliased --pq
+- Added support to customize order (--order) in which analyses are ran
+- Added support to correlate (--correlate) the queries used in one
+  analysis with following analyses
+- Only connects to MySQL when necessary
+- Options no longer mutually exclusive
+- --explain lists queries by rows produced (instead of join type of first table)
+  or by rows read if --rows-read
+- Improved query abstraction
+- Added support to time a sample of each unique query (--time-each-query)
+  or time every query (--time-all-queries)
+- Filters out non-SELECT statements
+
+v1.0 Sep 11 2005
+- Release
