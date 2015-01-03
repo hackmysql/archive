@@ -1,0 +1,176 @@
+http://hackmysql.com/mysqlreport
+
+mysqlreport changelog
+
+v3.5 April 16 2008
+- Fixed bug: incorrect checking of MySQL version caused mysqlreport to
+  ignore InnoDB status values in some cases. Simplified version from 3
+  integers (major, minor, patch) to 1 (50024 = 5.0.24, 60001 = 6.0.1, etc.)
+  for easier, more accurate version checking all around.
+- Fixed potential bug: read_relative_infiles might have incorrectly
+  divided infiles with multiple status value sets.
+- Fixed bug: if wait_timeout was greater than --relative, mysqlreport
+  would lose its connection while sleeping. Now the connection is closed
+  and reopened for each live relative report collection.
+- Infiles can now be given SHOW VARIABLES output (in addition to the
+  old method of inserting values manually like: key_buffer_size=128M)
+- Slow query time is beautified for microsecond, millisecond, and second
+  resolution (format_u_time):
+    0.000000 - 0.000999 = 0 - 999 µ
+    0.001000 - 0.999999 = 1 ms - 999.999 ms
+    1.000000 - n.nnnnnn = 1 s - n.nnnnn s
+- Added a lot more debugging output.
+
+v3.4a January 23 2008
+- Fixed bug: InnoDB report values were wrong in relative reports because
+  13 InnoDB status values needed to be excluded from being made relative.
+  (thanks Debbie)
+- Changed InnoDB Buffer Pool Read ratio to Read hit %
+
+v3.4 January 20 2008
+- Fixed bug: --relative infiles wouldn't work unless the SHOW STATUS
+  values were prefixed with a line matching: /Variable_name[\s|]+Value/ 
+  Now mysqlreport looks for Aborted_clients which should always be present.
+  (thanks Debbie)
+- Fixed formatting problem: tmp_table_size was too small for >99M
+- Removed redundant %Total: column label from Slow line
+- Added more debug info
+
+v3.3 January 8 2008
+- --all is now default operation; removed all "extra report" options
+  like --dms, --sas, --qcache, etc.
+- Slow line now displays long_query_time and log_slow_queries
+- Created Temp Table line now displays tmp_table_size
+- mysqlreport now extracts into its own directory
+
+v3.2 May 26 2007
+- Added --relative, --report-count, and --detach
+- Changed Key read and write from ratios to hit %
+
+v3.1 Apr 24 2007
+- Added support for table_open_cache system var (MySQL 5.1.3+)
+- Removed default assignments for $mycnf{'host'}, $mycnf{'port'}, and
+  $mycnf{'socket'}.
+- Connecting to MySQL now tries socket if one is given and actually
+  a socket, else TCP/IP host if one is given, else generic "host=localhost"
+  which relies on the MySQL client lib to do something useful.
+- Updated help for clarity.
+- Fixed bug: spelled "fsync" wrong
+
+v3.0a Dec 12 2006
+- Fixed bug on line 93: chomperc($mycnf{'pass'} = <STDIN>);
+  supposed to be chomp($mycnf{'pass'} = <STDIN>); (thanks jeroen)
+
+v3.0 Dec 8 2006
+- Added reports for Innodb values with -innodb, -innodb-only, and -dpr options
+- Added host from which report is on to subject line of email when report is
+  emailed with -email (thanks Anthony)
+- Increased read/write ratios from 0.00 to 0.000, decreased per/second vals
+  from 0.00/s to 0.0/s
+
+v2.8 and v2.9 ?
+(Skipped because "three-point-oh" sounds nice.)
+
+v2.7a Nov 15 2006
+- Fixed bug: --host was completely ignored if a socket was available (thanks Sam)
+
+v2.7 Oct 22 2006
+- Option "password" in ~/.my.cnf now recognized (used to be that only "pass" was recognized)
+- Options host, port, and socket now recognized in ~/.my.cnf
+- Given those two changes, the order of option precendece is such that ~/.my.cnf is read
+  first, then command line options override ~/.my.cnf options, and if nothing else default
+  values are assigned
+- --all actually shows all reports now (i.e. no more need to --all --tab)
+- Like mytop, mysqlreport tries to connect via a socket first, otherwise it tries via a
+  network connection
+                
+v2.6 Sep 3 2006
+- Added -socket option (thanks to Christian for the patch)
+- Use File::Temp instead of /tmp/mysqlreport.$$ (thanks to Christian for the patch)
+- Threads report, "Cache" line now "Cached" and shows thds in cache of thread_cache_size
+
+v2.5 Sep 1 2006
+- Added Current Key Buffer Usage (Key_blocks_unused/MySQL v4.1.2+) (thanks Christian)
+- GPL license
+
+v2.4 ?
+(Another version lost between here and San Francisco. Damn you Kristen...)
+
+v2.3a May 19 2006
+- Added -port option (thanks to islue for the patch)
+
+v2.3 Feb 17 2006
+- Made -password take password on command line, or prompt if none given
+- Added Running (running of connected) and Cache values to Threads report
+- Changed regex for -infile to work with batch output like mysql -B -e "show status"
+
+v2.2a Sep 23 2005
+- Made DTQ show difference between Total Questions and Unknown:
+  "+Unknown" means there's more Total Questions than we can account for
+  "-Unknown" means we counted more Questions than Total Questions
+
+v2.2 Sep 23 2005
+- Added -dtq option
+- Made regex for -infile accept leading and trailing spaces
+- Changed regex for -infile for sys var val lines
+- Moved %Com_vals stuff out of write_Com() into get_Com_values()
+- Renamed most of the reports
+
+v2.1 Sep 13 2005
+- Using --infile no longer requires connecting to MySQL (thanks Erik D.)
+
+v2.0 Sep 11 2005
+- Works in Windows now
+- Uses Term::ReadKey if availablee to not echo password prompt
+- Code cleanup
+
+v1.9 ?
+(Lost it somewhere on the road between here and San Francisco.)
+
+v1.8 Aug 8 2005
+- Added support for MySQL 5.0.2+ SHOW GLOBAL STATUS
+- Code cleanup (get_val_vars, sec_to_dhms, REPORT_1)
+
+v1.7 Aug 1 2005
+- Added -qcache option
+- Changed make_short again: If passed a 2nd param it treats 1k=1024 instead of =1000
+- Removed a lot of script comments
+
+v1.6 Jul 28 2005
+- Added -infile option
+- 'use strict' pragma
+
+v1.5 Apr 30 2005
+- Code cleanup
+
+v1.4 Apr 12 2005
+- Fixed bug: -outfile took effect before -p causing an invisible password prompt
+- Changed named from mysnapshot to mysqlreport
+- Added Com_update_multi to UPDATE count
+- Removed offset ability
+- Moved SELECT and Sort details to seperate section
+- Added -com -sas and -all options
+- Added MySQL version to first line of the report
+- Changed -output-file and -file to just -outfile
+- Report always prints to screen now even if it's also emailed (-email) or saved (-outfile)
+- Removd redundant column labels from format
+- DMS details listed in descending order by value
+
+v1.3 Feb 22 2005
+- Fixed bug: make_short returned inaccurate numbers because 1k = 1024 instead of 1k = 1000
+- Shortened format overall
+- Re-arranged SELECT details
+- Removed 'Sort rows' from SELECT details
+- Made Threads, Aborts, and Bytes sections optional with -tab command line option
+
+v1.2 Feb 7 2005
+- Fixed bug: Couldn't read pass=sad&*@% in ~/.my.cnf
+- Changed preg match to ignore double quotes around values in ~/.my.cnf (cPanel uses double quotes)
+- Changed -no-my-cnf option to -no-mycnf
+- Added %Total for Table Locks Waited
+
+v1.1 Feb 1 2005
+- Added -email option
+
+v1.0 Jan 11 2005
+- Release

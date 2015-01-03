@@ -1,0 +1,853 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+<title>The Guide To Understanding mysqlreport</title>
+<meta name="keywords" content="guide,understanding,interpret,mysqlreport,report" />
+<meta name="description" content="The Guide To Understanding mysqlreport." />
+<meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1" />
+</head>
+
+<body>
+<div id="Content">
+   <h1>The Guide To Understanding mysqlreport</h1>
+   <div class="inset_c">
+   This guide to understanding <a href="http://hackmysql.com/mysqlreport">mysqlreport</a>
+   explains everything that mysqlreport can report. It also teaches how to interpret and
+   understand all the values in context so that after reading a mysqlreport report ("a report")
+   the fundamental question that mysqlreport was created to answer can be answered:
+   How well is the MySQL server running?
+   <br /><br />
+   The current version of mysqlreport automatically generates a complete report that
+   covers practically every applicable MySQL status value. (This is different from all
+   previous versions which required the --all command line option to generate a complete report.)
+   The complete report has 14 report sections for a total of 121 lines. Depending on the
+   MySQL server configuration, some of the report sections may not be generated. For example,
+   if query caching is turned off, the forth report section, Query Cache, will not be generated.
+   Therefore, the report can vary in length.
+   <br /><br /> 
+   To facilitate better understanding and insight, this guide is written as a walk-through
+   interpretation of a complete report. The guide begins with the very first line and
+   examines and interprets every report section and line to the end.
+   <br /><br />
+   The complete report that this guide will interpret is given below.
+   Line numbers are added to make examining the report easier. Most line numbers are links
+   to the explanation of that line.
+<pre>
+   <a name="l1" href="#report_header">1</a> MySQL 5.0.3              uptime 0 0:34:26       Fri Sep  1 19:46:02 2006
+   <span style="color:black;">2</span>
+   <a name="l3" href="#key_report">3</a> __ Key _________________________________________________________________
+   <a href="#key_report:buffer_used">4</a> Buffer used   380.00k of 512.00M  %Used:   0.07
+   <a href="#key_report:buffer_usage">5</a>   Current      59.32M            %Usage:  11.59
+   <a href="#key_report:write_ratio">6</a> Write hit      97.04%
+   <a href="#key_report:read_ratio">7</a> Read hit       99.58%
+   <span style="color:black;">8</span> 
+   <a name="l9" href="#questions_report">9</a> __ Questions ___________________________________________________________
+  <a href="#questions_report:total">10</a> Total          98.06k   47.46/s
+  <a href="#questions_report:dtq">11</a>   DMS          81.23k   39.32/s  %Total:  82.84
+  <a href="#questions_report:dtq">12</a>   QC Hits      16.58k    8.02/s           16.91
+  <a href="#questions_report:dtq">13</a>   COM_QUIT        200    0.10/s            0.20
+  <a href="#questions_report:dtq">14</a>   Com_            131    0.06/s            0.13
+  <a href="#questions_report:dtq">15</a>   -Unknown         82    0.04/s            0.08
+  <a href="#questions_report:slow">16</a> Slow 5 s            0    0.00/s            0.00  %DMS:   0.00  Log:  ON
+  <a href="#questions_report:dms">17</a> DMS            81.23k   39.32/s           82.84
+  <a href="#questions_report:dms">18</a>   SELECT       64.44k   31.19/s           65.72         79.33
+  <a href="#questions_report:dms">19</a>   INSERT       16.75k    8.11/s           17.08         20.61
+  <a href="#questions_report:dms">20</a>   UPDATE           41    0.02/s            0.04          0.05
+  <a href="#questions_report:dms">21</a>   REPLACE           0    0.00/s            0.00          0.00
+  <a href="#questions_report:dms">22</a>   DELETE            0    0.00/s            0.00          0.00
+  <a href="#questions_report:com">23</a> Com_              131    0.06/s            0.13
+  <a href="#questions_report:com">24</a>   change_db       119    0.06/s            0.12
+  <a href="#questions_report:com">25</a>   show_fields       9    0.00/s            0.01
+  <a href="#questions_report:com">26</a>   show_status       2    0.00/s            0.00
+  <span style="color:black;">27</span> 
+  <a name="l28" href="#sas_report">28</a> __ SELECT and Sort _____________________________________________________
+  <a href="#sas_report">29</a> Scan               38    0.02/s %SELECT:   0.06
+  <a href="#sas_report">30</a> Range              14    0.01/s            0.02
+  <a href="#sas_report">31</a> Full join           3    0.00/s            0.00
+  <a href="#sas_report">32</a> Range check         0    0.00/s            0.00
+  <a href="#sas_report">33</a> Full rng join       0    0.00/s            0.00
+  <a href="#sas_report">34</a> Sort scan          14    0.01/s
+  <a href="#sas_report">35</a> Sort range         26    0.01/s
+  <a href="#sas_report">36</a> Sort mrg pass       0    0.00/s
+  <span style="color:black;">37</span>
+  <a name="l38" href="#qc_report">38</a> __ Query Cache _________________________________________________________
+  <a href="#qc_report:usage">39</a> Memory usage   17.81M of  32.00M  %Used:  55.66
+  <a href="#qc_report:frag">40</a> Block Fragmnt  13.05%
+  <a href="#qc_report:hip">41</a> Hits           16.58k    8.02/s
+  <a href="#qc_report:hip">42</a> Inserts        48.50k   23.48/s
+  <a href="#qc_report:hip">43</a> Prunes         33.46k   16.20/s
+  <a href="#qc_report:ratios">44</a> Insrt:Prune    1.45:1    7.28/s
+  <a href="#qc_report:ratios">45</a> Hit:Insert     0.34:1
+  <span style="color:black;">46</span>
+  <a name="l47" href="#tl_report">47</a> __ Table Locks _________________________________________________________
+  <a href="#tl_report">48</a> Waited          1.01k    0.49/s  %Total:   1.24
+  <a href="#tl_report">49</a> Immediate      80.04k   38.74/s
+  <span style="color:black;">50</span>
+  <a name="l51" href="#tables_report">51</a> __ Tables ______________________________________________________________
+  <a href="#tables_report">52</a> Open              107 of 1024    %Cache:  10.45
+  <a href="#tables_report">53</a> Opened            118    0.06/s
+  <span style="color:black;">54</span>
+  <a name="l55" href="#conn_report">55</a> __ Connections _________________________________________________________
+  <a href="#conn_report">56</a> Max used           77 of  600      %Max:  12.83
+  <a href="#conn_report">57</a> Total             202    0.10/s
+  <span style="color:black;">58</span>
+  <a name="l59" href="#temp_report">59</a> __ Created Temp ________________________________________________________
+  <a href="#temp_report">60</a> Disk table         10    0.00/s
+  <a href="#temp_report">61</a> Table              26    0.01/s    Size:  4.00M
+  <a href="#temp_report">62</a> File                3    0.00/s
+  <span style="color:black;">63</span>
+  <a name="l64" href="#thd_report">64</a> __ Threads _____________________________________________________________
+  <a href="#thd_report">65</a> Running            55 of   77
+  <a href="#thd_report">66</a> Cache               0              %Hit:    0.5
+  <a href="#thd_report">67</a> Created           201    0.10/s
+  <a href="#thd_report">68</a> Slow                0    0.00/s
+  <span style="color:black;">69</span>
+  <a href="#thd_report">70</a> __ Aborted _____________________________________________________________
+  <a href="#thd_report">71</a> Clients             0    0.00/s
+  <a href="#thd_report">72</a> Connects            8    0.00/s
+  <span style="color:black;">73</span>
+  <a href="#thd_report">74</a> __ Bytes _______________________________________________________________
+  <a href="#thd_report">75</a> Sent           38.46M  18.62k/s
+  <a href="#thd_report">76</a> Received        7.98M   3.86k/s
+  <span style="color:black;">77</span>
+  <a name="l78" href="#idb_bp_report">78</a> __ InnoDB Buffer Pool __________________________________________________
+  <a href="#idb_bp_report:usage">79</a> Usage           3.95M of   7.00M  %Used:  56.47
+  <a href="#idb_bp_report:read_ratio">80</a> Read hit       99.99%
+  <a href="#idb_bp_report:pages">81</a> Pages
+  <a href="#idb_bp_report:pages">82</a>   Free            195            %Total:  43.53
+  <a href="#idb_bp_report:pages">83</a>   Data            249                     55.58 %Drty:   0.00
+  <a href="#idb_bp_report:pages">84</a>   Misc              4                      0.89
+  <a href="#idb_bp_report:pages">85</a>   Latched           0                      0.00
+  <a href="#idb_bp_report:reads">86</a> Reads         574.56k     0.6/s
+  <a href="#idb_bp_report:reads">87</a>   From file       176     0.0/s            0.03
+  <a href="#idb_bp_report:reads">88</a>   Ahead Rnd         4     0.0/s
+  <a href="#idb_bp_report:reads">89</a>   Ahead Sql         2     0.0/s
+  <a href="#idb_bp_report:writes">90</a> Writes        160.82k     0.2/s
+  <a href="#idb_bp_report:flushes">91</a> Flushes         1.04k     0.0/s
+  <a href="#idb_bp_report:wait_free">92</a> Wait Free           0       0/s
+  <span style="color:black;">93</span>
+  <a name="l94" href="#idb_lock_report">94</a> __ InnoDB Lock _________________________________________________________
+  <a href="#idb_lock_report:waits">95</a> Waits               0       0/s
+  <a href="#idb_lock_report:current">96</a> Current             0
+  <a href="#idb_lock_report:time">97</a> Time acquiring
+  <a href="#idb_lock_report:time">98</a>   Total             0 ms
+  <a href="#idb_lock_report:time">99</a>   Average           0 ms
+  <a href="#idb_lock_report:time">100</a>  Max               0 ms
+  <span style="color:black;">101</span>
+  <a name="l102" href="#idb_dpr_report">102</a> __ InnoDB Data, Pages, Rows ____________________________________________
+  <a href="#idb_dpr_report:data">103</a> Data
+  <a href="#idb_dpr_report:data">104</a>   Reads           225     0.0/s
+  <a href="#idb_dpr_report:data">105</a>   Writes          799     0.0/s
+  <a href="#idb_dpr_report:data">106</a>   fsync           541     0.0/s
+  <a href="#idb_dpr_report:pending">107</a>   Pending
+  <a href="#idb_dpr_report:pending">108</a>     Reads           0
+  <a href="#idb_dpr_report:pending">109</a>     Writes          0
+  <a href="#idb_dpr_report:pending">110</a>     fsync           0
+  <span style="color:black;">111</span>
+  <a href="#idb_dpr_report:pages">112</a> Pages
+  <a href="#idb_dpr_report:pages">113</a>   Created          23     0.0/s
+  <a href="#idb_dpr_report:pages">114</a>   Read            226     0.0/s
+  <a href="#idb_dpr_report:pages">115</a>   Written       1.04k     0.0/s
+  <span style="color:black;">116</span>
+  <a href="#idb_dpr_report:rows">117</a> Rows
+  <a href="#idb_dpr_report:rows">118</a>   Deleted      25.04k     0.0/s
+  <a href="#idb_dpr_report:rows">119</a>   Inserted     25.04k     0.0/s
+  <a href="#idb_dpr_report:rows">120</a>   Read         81.91k     0.1/s
+  <a href="#idb_dpr_report:rows">121</a>   Updated           0       0/s
+</pre>
+   </div>
+
+   <h2>Report Header: <a name="report_header" href="#l1">Line 1</a></h2>
+   <div class="inset_c">
+   The first line of a report, the report header, has three pieces
+   of information: the MySQL server version, the MySQL server uptime, and
+   the server's current date and time.<br /><br />
+   The MySQL server version indicates what features the MySQL server does or does not
+   have. The MySQL server uptime indicates how representative the report values are.
+   The MySQL server uptime is important for assessing the report because
+   the report values will be skewed and misleading if the MySQL server has not
+   been running for at least a few hours. However, even a few hours may not be
+   enough if, for example, the MySQL server has only been running for six hours in
+   the middle of the night with almost no usage. Ideally, the MySQL server
+   should be up for at least one day before using mysqlreport. 
+   The report values will better represent the MySQL server the longer that
+   the MySQL server is up.
+   <br /><br />
+   In this example, the MySQL server has only been up for 34 minutes. Consequently,
+   the report is not very representative.
+</div>
+
+   <h2>Key Report: <a name="key_report" href="#l3">Lines 3 - 7</a></h2>
+   <div class="inset_c">
+   The first major report section of a mysqlreport report is the Key report because
+   keys (indexes) are the most important part of a MySQL server. Although the report
+   cannot indicate if the MySQL server is well indexed or not, it can generally indicate
+   how well the shared key buffer is being utilized. This report section only applies to
+   the default shared key buffer for MyISAM tables; it currently does not look at other
+   key buffers (created by the administrator, like hot and cold key buffers).
+
+   <h3>Buffer used: <a name="key_report:buffer_used" href="#l3">Line 4</a></h3>
+   <div class="inset_c">
+   The first question to ask of a MySQL server is: how much of the key
+   buffer is being used? If it is not being used a lot, that is okay because MySQL only
+   allocates system RAM for the key buffer when needed. That means that if the key buffer
+   size is set to 512M, MySQL does not automatically allocate 512M of system RAM when
+   it starts. MySQL allocates up to 512M of system RAM when it needs to.
+   <br /><br />
+   
+   The fourth line, Buffer used, is supposed to indicate the maximum amount of key buffer MySQL
+   has ever used at once. In actuality, MySQL may currently being using less or, strangely, more.
+   MySQL calls this a "high water mark."
+   This line is usually indicative of whether or not the key_buffer_size system variable is
+   sufficiently large. If this line indicates that MySQL has used upwards of 80% to 90%
+   of the key buffer, then key_buffer_size should be increased. Note, however, that this
+   line will probably never indicate above 95% used because, as the MySQL documentation
+   states, some of the shared key buffer is used for internal data structures which
+   mysqlreport cannot account for. Therefore, 95% used is practically 100% used.
+   <br /><br />
+   In this example, the MySQL server has used 380k of 512M, or 0.07%, so the key buffer
+   is plenty large. However, the next line indicates something different.
+   </div>
+
+   <h3>Current: <a name="key_report:buffer_usage" href="#l3">Line 5</a></h3>
+   <div class="inset_c">
+   This line only appears for MySQL servers version 4.1.2 and newer because the
+   Key_blocks_unused status value was added in version 4.1.2. This line indicates how
+   much key buffer MySQL is actually using right now. If the previous line is truly a high water
+   mark, then this line should always be less than or equal to it, but this is not always the case.
+   Whether this is a bug in MySQL or not is unknown. Regardless, this line in combination with the
+   preceding line gives a good indication of whether or not key_buffer_size is set sufficiently large.
+   <br /><br />
+
+   In this example, the MySQL server is using about 60M of the key buffer (12%), which is good because
+   it is nowhere near full capacity. 
+   </div>
+
+   <h3>Write hit: <a name="key_report:write_ratio" href="#l3">Line 6</a></h3>
+   <div class="inset_c">
+   Indexes (keys) are inherently RAM-based. Their usefulness is due in part to the fact
+   that they exist in RAM which is very quick to access instead of existing only on a hard
+   disk which is very slow to access. However, MySQL inevitably must write and read
+   indexes to and from a hard disk at times.
+   <br /><br />
+   This line, Write hit, indicates the effectiveness of key writes. (Technically, it is the
+   ratio of key writes to hard disk to key writes to RAM expressed as a percentage.)
+   There is no standard value for key write hit. Key write hit will depend on what kind
+   queries the MySQL server primarily executes. If MySQL primarily executes updates,
+   inserts, etc., then the key write hit may be near 0% and this is acceptable. If MySQL
+   primarily executes selects, then the key write hit may be 90% or more and this is
+   acceptable too. However, a negative key write hit (i.e., less than zero percent)
+   indicates that MySQL is more often writing keys to hard disk than RAM which is
+   usually slow, undesirable, and unacceptable.
+   <br /><br />
+   To best interpret the key write hit effectiveness, it is necessary to
+   know how the MySQL server is primarily used. The
+   <a href="#questions_report:dms">DMS sub-report</a> can help determine this.
+   </div>
+
+   <h3>Read hit: <a name="key_report:read_ratio" href="#l3">Line 7</a></h3>
+   <div class="inset_c">
+   More important than the key write hit is the key read hit. This line indicates
+   the effectiveness of key reads. (Technically, it is the ratio of key reads from
+   hard disk to key reads from RAM.) Key read hit should be no less than 99%.
+   A lower percentage may indicate a problem. A low key hit percentage is usually
+   caused by the key buffer being too small (indicated in the Key Report section above)
+   which prevents MySQL from loading more indexes into RAM. When this happens, MySQL
+   must revert to reading indexes from the hard disk which is terribly slow and
+   completely negates the point of indexes.
+   <br /><br />
+   It is common, however, for this value to be less than 99% within the first hour or two of
+   starting (or restarting) MySQL. After an hour or two it should definitely be at least 99%.
+   </div>
+</div>
+
+   <h2>Questions Report: <a name="questions_report" href="#l9">Lines 9 - 26</a></h2>
+   <div class="inset_c">
+   The second major report section, Questions, is the second most important because
+   it shows a lot about what MySQL is busy doing and how busy it is doing all
+   that it is doing. Questions includes SQL queries and MySQL protocol communications.
+   A common concern is how many queries per second the MySQL server is executing,
+   but this metric is actually very arbitrary when considered in the larger context.
+   The larger context is all the other questions that MySQL is handling. This report
+   provides the larger context.
+
+   <h3>Total: <a name="questions_report:total" href="#l9">Line 10</a></h3>
+   <div class="inset_c">
+   The first line is simply the total number of all questions that MySQL has answered&dagger; (first
+   column) and the rate of those answers over the MySQL server uptime (second column).
+   The rate is what is commonly referred to when people make statements such as, "My MySQL server
+   averages one hundred queries a second." However, the real question is:
+   of those one hundred, how many are really accomplishing something?
+   mysqlreport answers this question in the following lines.
+   <br /><br />
+
+   (&dagger; A clarification on terms: questions are answered and queries are executed.
+   mysqlreport makes the distinction between questions and queries, especially in the
+   Questions Report. Questions are every and any kind of request made to the MySQL server.
+   This includes SQL queries but also MySQL-specific commands and protocol communications.
+   Queries are only SQL queries: SELECT, UPDATE, etc.)
+   </div>
+
+   <h3>Distribution of Total Queries (DTQ): <a name="questions_report:dtq" href="#l9">Lines 11 - 15</a></h3>
+   <div class="inset_c">
+   All questions can largely be divided into five categories:
+   <a href="http://dev.mysql.com/doc/refman/5.0/en/data-manipulation.html">Data Manipulation Statements</a>
+   (DMS), query cache hits (QC Hits), COM_QUIT, all other Com_ commands, and 
+   Unknown. These five categories are indicated in the five lines 11 through 15 but their
+   order is dynamic: mysqlreport sorts them in descending order based on total number
+   (first column).
+   <br /><br />
+   This sub-report quickly indicates what MySQL is most busy doing.
+   Ideally, MySQL should be most busy with DMS or QC Hits because these are the categories
+   of questions that are really accomplishing something. COM_QUIT, Com_, and Unknown are
+   necessary but should play only a minor role.
+   <br /><br />
+   Before explaining each category further, it will be helpful to mention that the
+   third column for this and other sub-reports in the Questions report shows the
+   percentage of that line's total value to all questions (Total, line 10).
+   <br /><br />
+   In this example, DMS questions account for 82.84% of all questions that the MySQL
+   server has answered which is a really good percentage.<br /><br />
+
+   <b>Data manipulation statements</b> include: SELECT, INSERT, REPLACE, UPDATE, and DELETE.
+   (Technically, there are others but mysqlreport uses only these.) Basically, DMS is
+   what one thinks of when thinking of MySQL doing something useful. Hence, DMS should
+   be what MySQL is most busy doing. This category is expanded in more detail in
+   the DMS sub-report later, lines 17 through 22.<br /><br />
+
+   <b>QC Hits</b> is the number of queries that MySQL has executed by retrieving
+   the result set from the query cache instead of actually executing the query.
+   Having a high percentage of QC Hits is coveted because returning result sets from the QC
+   is very fast. However, it can be difficult to achieve a very effective QC cache for
+   reasons explained in the Insrt:Prune and Hit:Insert Ratios section of the Query
+   Cache Report.<br /><br />
+   
+   In this example, QC Hits account for 16.91% of all questions which is pretty good.
+   However, don't be mislead by this: the Query Cache Report (lines 38 through 45) can
+   tell a very different story. Whereas QC Hits seem pretty good here, this server's
+   query cache is actually not that spectacular as will be seen later.<br /><br />
+
+   <b>COM_QUIT</b> is a category which is written about in the article
+   <a href="http://hackmysql.com/com_quit">COM_QUIT and Questions</a>. It is
+   an unimportant category which can be ignored. It is included in mysqlreport
+   for completeness.<br /><br />
+   
+   <b>Com_</b> represents all the various commands that MySQL handles,
+   usually protocol related. Ideally, this category should be low because when it
+   is high it is like MySQL is spinning its wheels really fast but going nowhere.
+   A high value for this category can indicate some weird problems which are discussed
+   later in the Com_ sub-report (lines 23 through 26 usually).<br /><br />
+
+   <b>Unknown</b> is an inferred category. Ideally, the sum total of the preceding four
+   categories should equal total questions, but they usually do not. This is because
+   there are a few questions that MySQL handles and increments the total questions
+   counter for but does not otherwise maintain a separate status value for.
+   <br /><br />
+   This line is dynamic in that it can read "+Unknown" or "-Unknown."
+   +Unknown means there are more total questions than mysqlreport can account for.
+   -Unknown means mysqlreport counted less questions than total questions.
+   <br /><br />
+   This category can vary greatly. On some servers it is near the top, but on
+   most it is at the very bottom. It is better for it to be at the very bottom.
+   Eventually, the nature of these unknowns will be discovered and mysqlreport
+   will account for them correctly.
+   </div>
+   
+   <h3>Slow: <a name="questions_report:slow" href="#l9">Line 16</a></h3>
+   <div class="inset_c">
+   Line 16 is very important: it indicates the number of slow queries that MySQL has executed.
+   What constitutes "slow" is set by the
+   <a href="http://dev.mysql.com/doc/refman/5.0/en/server-system-variables.html">system variable</a>
+   long_query_time which is 10 (seconds) by default. Since many people consider 10 seconds to be an
+   eternity in database time, long_query_time is best set to 1 or less for newer versions of MySQL
+   that support microsecond resolution.<br /><br />
+   This value, long_query_time, is the number that appears just after Slow. As of
+   <a href="http://hackmysql.com/mysqlreport">mysqlreport</a> v3.5, the
+   <a href="http://hackmysql.com/slowlog">resolution</a> of this value
+   is given: s (seconds), ms (milliseconds), or &micro; (microseconds). In some cases, the
+   resolution may not be shown due to the width limit of this field in the report which is 8 characters.
+   For example, a long_query_time value of '999.999 ms' is truncated to '999.999 ', or '10.000100 s' is
+   truncated to '10.0001 '.<br /><br />
+   Ideally, there should be zero slow queries, but usually there are a few.
+   Generally, Slow as a percentage of total questions (third column) should be 0.05 or less.
+   There can be a lot of slow queries (first column), but it is the percentage of all them
+   compared to total that indicates a problem. This line also adds a fourth column: percentage
+   of DMS questions. For Slow, zero is best, but this column is more useful in the
+   DMS sub-report.<br /><br />The last column, Log, indicates if slow query logging is turned ON or OFF
+   (set by the log_slow_queries system variable). Slow query logging should always be ON.
+   </div>
+
+   <h3>DMS: <a name="questions_report:dms" href="#l9">Lines 17 - 22</a></h3>
+   <div class="inset_c">
+   The DMS sub-report, like the DTQ sub-report, is sorted in descending order of value
+   (first column).
+   Its 6 lines, 17 through 22, represent the data manipulation
+   statements mentioned earlier (SELECT, INSERT, etc.). The first line (17) is
+   the total of all these again (identical to line 11 in the DTQ sub-report).
+   <br /><br />
+   This sub-report indicates what "kind" of MySQL server this is: is it SELECT
+   heavy, or INSERT heavy, etc. MySQL servers tend to be SELECT heavy.
+   Knowing what kind of MySQL server a server is helps orient one's thoughts and
+   understanding about other the other values.
+   For example, an INSERT heavy server should have a write ratio near 1.0. It
+   will probably have high values regarding table locks. It would also be a
+   candidate for InnoDB tables.
+   A SELECT heavy server had better have a read ratio of zero and a very low table
+   lock values. It maybe be using query caching. It will probably use MyISAM.
+   <br /><br />
+   In this example, the server is SELECT heavy: 65.72% of all questions are SELECTs
+   (third column), and 79.33% of all DMS questions are SELECTs (fourth column).
+   Clearly, this server is oriented towards SELECT statements.
+   Knowing that shapes how one approaches all aspects of optimization.
+   </div>
+
+   <h3>Com_: <a name="questions_report:com" href="#l9">Lines 23 - (26)</a></h3>
+   <div class="inset_c">
+   The Com_ sub-report like other sub-report so-far is sorted.
+   The contents of this sub-report vary from server to server because
+   each line (default 3; more can be specified like --com 10) represents some Com_
+   status value which, in turn, usually represent some COM_ command in the
+   <a href="http://forge.mysql.com/wiki/MySQL_Internals">MySQL protocol</a>.
+   Most of the names are intuitive, like Com_change_db.
+   <br /><br />
+   This sub-report matters when Com_ in the DTQ sub-report is near the top because it
+   indicates MySQL is busy doing "program things" instead of answering SQL queries.
+   As an example, there was a server that had a very high number of Com_rollback.
+   A rollback occurs when a transaction fails and this is usually not a good thing.
+   The server was failing nearly every transaction so clearly something was wrong.
+   Without mysqlreport, the DTQ sub-report, and this sub-report it was practically
+   impossible to otherwise tell that the server had any problem.
+   <br /><br />
+   For most servers, the Com_ sub-report indicates nothing weird, but it is good to
+   check it from time to time.
+   </div>
+</div>
+
+   <h2>SELECT and Sort Report: <a name="sas_report" href="#l28">Lines 28 - 36</a></h2>
+   <div class="inset_c">
+   The SELECT and Sort Report details the various Select_ status value which are described in the article
+   <a href="http://hackmysql.com/selectandsort">MySQL Select and Sort Status Variables</a>.
+   <br /><br />
+   The most important lines are 29 and 31: Scan and Full join. Scan indicates
+   how many SELECT statements resulted in a full table scan which is a slow process.
+   Full join is like Scan except that it applies to tables being joined in a multi-table
+   query. Such tables are joined by process of a full table scan, but in the context
+   of a join, a table scan is even slower. Therefore, these two values should be
+   as low as possible, but there is no real standard for "low" here. Some servers which
+   are running really well have a relatively high percentage of Scan to all SELECT
+   statements (third column).
+</div>
+
+   <h2>Query Cache Report: <a name="qc_report" href="#l38">Lines 38 - 45</a></h2>
+   <div class="inset_c">
+   The Query Cache report only appears if, one, the MySQL server version supports
+   query cache and, two, query cache is enabled.
+
+   <h3>Memory usage: <a name="qc_report:usage" href="#l38">Line 39</a></h3>
+   <div class="inset_c">
+   This first line of this report indicates how much of the query cache
+   memory is being used. If it is at max capacity, this will probably also be reflected
+   in the Prunes value below since queries in the QC are pruned when memory is low.
+   </div>
+
+   <h3>Block Fragmnt: <a name="qc_report:frag" href="#l38">Line 40</a></h3>
+   <div class="inset_c">
+   Line 40, Block Fragmnt (Fragmentation), indicates a condition particular to the way
+   the query cache functions. Quoting from the MySQL manual section
+   <a href="http://dev.mysql.com/doc/refman/5.0/en/query-cache-configuration.html">5.14.3. Query Cache Configuration</a>:<br />
+   <div style="margin-left:20px;">
+      The default value of query_cache_min_res_unit is 4KB. This should be adequate for
+      most cases. ... If you have a lot of queries with small results, the default block
+      size may lead to memory fragmentation, as indicated by a large number of free blocks.
+      Fragmentation can force the query cache to prune (delete) queries from the cache
+      due to lack of memory. In this case, you should decrease the value of
+      query_cache_min_res_unit. The number of free blocks and queries removed due to
+      pruning are given by the values of the Qcache_free_blocks and Qcache_lowmem_prunes
+      status variables.
+   </div>
+   This value is a percentage of free QC blocks to total blocks. The higher the percentage,
+   the more the QC memory is fragmented. 10% to 20% is about average.
+   <br /><br />
+   In this example, block fragmentation is 13.05%. This is acceptable, but it might be
+   helpful to play around with query_cache_min_res_unit to see if it could be lowered.
+   </div>
+
+   <h3>Hits, Inserts, Prunes: <a name="qc_report:hip" href="#l38">Lines 41 - 43</a></h3>
+   <div class="inset_c">
+   Query cache Hits, Inserts, and Prunes are indicated on lines 41, 42, and 43. Hits is
+   the most important because it indicates how many SELECT statements were served
+   from the cache, so the more the better. Inserts and Prunes are better understood in
+   terms of the ratio on line 44. Although, as mentioned earlier, a high rate of Prunes
+   can be indicative of the QC size being too small, but not always.
+   <br /><br />
+   In this example, only 55% of the QC is in use, with relatively low fragmentation,
+   yet prunes are pretty high; prunes are occurring at the rate of 16/s, double the
+   rate of QC hits. In a sense, this server's QC is like an apple tree where the
+   limbs are being cut off faster than the apples are being picked.
+   </div>
+
+   <h3>Insrt:Prune and Hit:Insert Ratios: <a name="qc_report:ratios" href="#l38">Lines 44 - 45</a></h3>
+   <div class="inset_c">
+   The QC Insert:Prune ratio on line 44 is an indicator of QC volatility. In a highly stable
+   QC, more queries will be inserted than are pruned. In a volatile QC, this ratio will be
+   one-to-one or heavy on the prune side, indicating a kind of evacuation of queries from the
+   QC. A stable QC is desirable because a stable QC implies that the cached queries are being used
+   often. A volatile QC can indicate two things: one, the QC size is too small so MySQL
+   has to keep pruning and inserting queries, or two, MySQL is trying to cache everything to
+   a self-defeating end.
+   <br /><br />
+   In the first case, simply increasing the QC size may help. This type of volatility may
+   be further indicated by high block fragmentation and QC memory usage.
+   <br /><br />
+   The second type of volatility is more common because MySQL does try to cache
+   nearly everything it can when the QC is enabled with the default type 1.
+   Type 1 means (quoting the MySQL manual): "Cache all query results except for those
+   that begin with SELECT SQL_NO_CACHE." It seems, however, that SQL_NO_CACHE is rarely
+   used. A better way to enable the QC is with type 2 "DEMAND": "Cache results only for
+   queries that begin with SELECT SQL_CACHE." Demand caching requires more work for
+   developers because they have to explicitly add SQL_CACHE to the queries that they
+   want MySQL to cache, but the advantage is that they probably know what queries are
+   good, stable cache candidates.
+   <br /><br />
+   The other ratio is Hit:Insert. This ratio indicates QC effectiveness. Ideally, the
+   MySQL server should insert a bunch of stable queries into the QC, then get a lot
+   more hits on them. Therefore, this ratio should be heavy on the hit side if the
+   QC is effective. If it is heavy on the insert side, then the QC is not really
+   helping much and it is probably too volatile. Consider a Hit:Insert ratio of 1:1.
+   This practically means that a cached result is only used once before it is replaced.
+   This completely defeats the idea of a query cache. A worse ratio, like 0.34:1,
+   indicates that some results are not even hit before they are pruned or replaced.
+   <br /><br />
+   In this example, as mentioned previously in the DTQ sub-report, even though QC
+   Hits account for a good percentage of total questions, the actual QC effectiveness
+   is really low as indicated by the Hit:Insert ratio being terribly Insert heavy.
+   This MySQL server would benefit from demand caching since QC memory usage and fragmentation
+   are not bad. Chances are MySQL is just defeating itself trying to cache everything.
+   </div>
+</div>
+
+   <h2>Table Locks Report: <a name="tl_report" href="#l47">Lines 47 - 49</a></h2>
+   <div class="inset_c">
+   The Table Locks report consists of two lines: the first, Waited, shows the number
+   of table locks that MySQL had to wait to obtain, and the second, Immediate, shows
+   the number of table locks MySQL obtained immediately. Waiting is almost always
+   a bad thing in database terms, therefore, table locks waited should be as low
+   as possible. What is most indicative of table locking
+   problems is the third column of table locks waited: %Total of all table locks. The
+   percentage of table locks that had to wait should be 10% or less. Higher percentage
+   can indicate poor table/query indexing or slow queries.
+</div>
+
+   <h2>Tables Report: <a name="tables_report" href="#l51">Lines 51 - 53</a></h2>
+   <div class="inset_c">
+   The Tables report is also two lines: the first, Open, shows how many tables
+   are open right now (first column), of how many total possible (table cache; second column),
+   and the percentage of table cache usage (third column). The second line, Opened, shows the
+   total number of tables MySQL has ever opened and this value over the MySQL server uptime
+   (second column).
+   <br /><br />Two things are important here: first is the table cache usage.
+   It is not bad to have 100% table cache usage, but if it is close to
+   100%, then it may be beneficial to increase the table_cache system variable.
+   Second, the rate of opening tables can also help determine if table_cache
+   is too low. Generally, it is nice to have this value less than 1/s. However,
+   a busy and well running MySQL server can, for example, be opening 7 tables/s and
+   running at 100% table cache.
+</div>
+
+   <h2>Connections Report: <a name="conn_report" href="#l55">Lines 55 - 57</a></h2>
+   <div class="inset_c">
+   Another two line report, the Connection report is practically identical to the
+   Tables report and so it will not be explained again. If the max number
+   of connections used is approaching 100% (first line, third column), the
+   max_connections system variable might need to be increased. However, this
+   is often misleading. One often sees MySQL servers with very high max_connection
+   for no good reason. The default value is 100 and this works for even extremely
+   busy, well-optimized servers. A connection to MySQL should last a fraction of
+   a second, so even 100 connections goes a long way. If max connections
+   is very high or slowly rising over time, the problem might be elsewhere,
+   like slow queries, poor indexing, or even
+   <a href="http://hackmysql.com/dns">slow DNS resolution</a>. Before setting
+   max_connections above 100, discover the fundamental reason why 100
+   connections at once is not enough and verify that
+   it is a legitimate need and not actually another
+   problem that manifests itself as too few connections.
+   <br /><br />
+   Regarding the number of connections per second, this value can be rather high.
+   In fact, if it is high and everything else is working well, it is usually a good indication.
+   Upwards of 10 connections/s is possible, but most server's connections/s are well under 5/s.
+</div>
+
+   <h2>Created Temp Report: <a name="temp_report" href="#l59">Lines 59 - 62</a></h2>
+   <div class="inset_c">
+   MySQL can create temporary tables on hard disk, in RAM, and in temporary files.
+   Each of these three corresponds to the three lines of the Created Temp report.
+   These value are relative; there is no standard for them. Since temporary
+   tables on hard disk are the slowest (indicated by the first line, Disk table),
+   it is best if this value is the lowest of the three. A temporary table is created
+   on hard disk only if it cannot fit into a temporary table in RAM which is limited
+   by the system variable tmp_table_size. The value of tmp_table_size is indicated by
+   Size on the second line, third column. Temporary tables in RAM (indicated by the
+   second line, Table) and temporary files are so common that these value are completely
+   relative to one's MySQL server.
+</div>
+
+   <h2>Threads, Aborted, Bytes Reports: <a name="thd_report" href="#l64">Lines 64 - 76</a></h2>
+   <div class="inset_c">
+   These three reports are the least important. Therefore, they are not discussed in detail
+   and they are mostly self-evident.
+   <br /><br />
+   There is one line of particular interest: line 66 of the Threads report, Cache
+   and specifically %Hit. Every connection to MySQL is handled by a separate
+   thread. At startup, MySQL creates a few threads and keeps a few in a thread cache
+   so that it does not have to constantly keep killing and creating threads. Although
+   threads are not expensive to make, it is not good to "thread thrash."
+   When the number of connections/s to MySQL exceeds the thread cache (set by the
+   system variable thread_cache_size) MySQL starts to thread thrash: it goes crazy
+   creating threads to keep up with the demand for new connections. When this happens,
+   the thread cache hit rate drops.
+   <br /><br />
+   Does thread thrashing matter? Yes it does:
+   <a href="http://jeremy.zawodny.com/blog/archives/000173.html">Jeremy Zawondy once
+   blogged</a>:
+   <div style="margin-left:20px;">
+      So the moral of the story is this: If you have a busy server that's getting
+      a lot of quick connections, set your thread cache high enough that the
+      Threads_created value in SHOW STATUS stops increasing. Your CPU will thank you. ...
+      Thread caching really wasn't the worst of our problems. But it became the worst
+      after we had fixed all the bigger ones.
+   </div>
+   Therefore, if the MySQL server is thread thrashing (indicated by a low Threads
+   Cached %Hit), increase thread_cache_size.
+   <br /><br />
+
+   In this example, Thread Cache %Hit is a very poor 0.05% which means nearly every
+   new connection causes MySQL to create a new thread. It is easy to see why: the first
+   column of the same line (66) says there are zero threads left in the cache. Therefore,
+   thread_cache_size should be increased. Also notice the correlation between line 67,
+   threads created, and the earlier line 57, total connections: 201 threads created,
+   202 total connections. Hence, the near-zero thread cache hit rate.
+</div>
+
+   <h2>InnoDB Buffer Pool Report: <a name="idb_bp_report" href="#l78">Lines 78 - 92</a></h2>
+   <div class="inset_c">
+   The InnoDB reports that follow were added in mysqlreport v3.0. The Innodb_ status
+   values (in SHOW STATUS;) are only available in MySQL v5.0.2 and later. Therefore, mysqlreport
+   may not show these InnoDB reports even if the MySQL is running the InnoDB storage engine.
+   In short: mysqlreport's InnoDB reports only work with MySQL v5.0.2 and later.<br /><br />
+
+   A central feature of the InnoDB storage engine is the buffer pool in which InnoDB caches
+   table data and indexes. Internally, the buffer pool is composed of 16Kb pages which
+   contain different types of data. The InnoDB Buffer Pool Report contains values pertaining
+   to the pages in the buffer pool.<br /><br />
+
+   <b>NOTE</b>: I have not seen enough mysqlreports from MySQL servers that are
+   both version 5.0.2 or newer and relying heavily on InnoDB. Therefore, the guide
+   covering the InnoDB reports may seem less thorough than the guide covering the
+   previous reports. Although MySQL v5 has been the GA release for awhile now,
+   it is amazing how common v4.0 and v4.1 still are.
+
+   <h3>Usage: <a name="idb_bp_report:usage" href="#l78">Line 79</a></h3>
+   <div class="inset_c">
+   Line 79, InnoDB Buffer Pool Usage is similar to line 4, Key Buffer used.
+   However, the MyISAM engine stores only indexes in its key buffer (hence the name),
+   but the InnoDB engine stores indexes and other data in the buffer pool.
+   Therefore, this line shows how much of the buffer pool is being used but
+   it does not show what accounts for the usage. To get an idea of what
+   accounts for the buffer pool usage, one must look at lines 81 through 85.
+   <br /><br />
+
+   Obviously, one must avoid running out of buffer pool space. With the MyISAM
+   engine, running out of key buffer space may only cause performance problems
+   (because of the adverse effect on table indexes). With the InnoDB engine,
+   running out of buffer pool space can cause many more problems because nearly
+   everything relies on the buffer pool. It is possible to
+   <a href="http://dev.mysql.com/doc/refman/5.0/en/innodb-configuration.html">configure
+   an auto-extending buffer pool</a>.
+   </div>
+
+   <h3>Read hit: <a name="idb_bp_report:read_ratio" href="#l78">Line 80</a></h3>
+   <div class="inset_c">
+   The InnoDB Buffer Pool Read hit is very similar to Key Read hit on line 7.
+   However, given that InnoDB stores more than just indexes in the buffer
+   pool, this value is more general then Key Read hit.<br /><br />
+   InnoDB Buffer Pool Read hit indicates the percentage of buffer pool page reads (hits)
+   from RAM (verses from hard disk). Therefore, this percentage should be very
+   near 100.00%. In most cases, this percentage is &gt; 99.98%.
+   </div>
+
+   <h3>Pages: <a name="idb_bp_report:pages" href="#l78">Lines 81 - 85</a></h3>
+   <div class="inset_c">
+   These lines are a very broad look into the substance of the buffer pool.
+   Each line (82 - 85) corresponds to a different kind of buffer pool page:
+   free pages (line 82), data pages (83), miscellaneous pages (84), and
+   "latched" pages (85).<br /><br />
+   Free pages are self-describing. The far-right column, "%Total:", indicates
+   what percentage of all buffer pool pages are free (or data, misc, and
+   latched correspondingly). This line is the opposite of line 79: instead
+   of saying how much of the buffer pool is used (line 79), this line says
+   how much of the buffer pool is free.<br /><br />
+   Data pages are also self-describing. Currently there is no way to know
+   the kinds of data that these pages comprise. This line has one extra
+   column: %Drty (%Dirty). This column indicates what percentage of data pages
+   have been modified (are dirty) but have not been flushed/saved back to
+   hard-disk.<br /><br />
+   Not much can be said about the remaining two kinds of pages: misc and latched.
+   Regarding miscellaneous pages, the MySQL manual simply says:
+   "The number of pages that are busy because they have been allocated for
+   administrative overhead such as row locks or the adaptive hash index."
+   And regarding latched pages: "These are pages currently being read or written
+   or that cannot be flushed or removed for some other reason."
+   </div>
+
+   <h3>Reads: <a name="idb_bp_report:reads" href="#l78">Lines 86 - 89</a></h3>
+   <div class="inset_c">
+   The following four lines give some indication of InnoDB's buffer pool reading
+   activity. The first line, line 86, is simply a metric of the number of
+   buffer pool reads from RAM. On busy servers using InnoDB, this value should
+   be high because InnoDB should be reading most of its pages from the buffer
+   pool in RAM. This metric can been considered a measure of InnoDB buffer pool
+   throughput. Since almost everything InnoDB needs is kept in and retrieved
+   from its buffer pool, buffer pool reads should be as fast as possible.
+   For example, an InnoDB Buffer Pool Reads rate (second column) of over 200k/s
+   is not impossible.<br /><br />
+
+   Line 87, however, should be much smaller in value. Line 87 lists
+   "The number of logical reads that InnoDB could not satisfy from the buffer
+   pool and had to do a single-page read." In other words, how many buffer pool
+   page reads from hard disk.<br /><br />
+
+   Line 88, Ahead Rnd (Random), lists "The number of random read-aheads
+   initiated by InnoDB. This happens when a query scans a large portion
+   of a table but in random order."<br /><br />
+
+   Line 89, Ahead Sql (Sequential), lists "The number of sequential
+   read-aheads initiated by InnoDB. This happens when InnoDB does a
+   sequential full table scan." As always, full table scans are usually
+   a bad thing and should be minimized.
+   </div>
+
+   <h3>Writes: <a name="idb_bp_report:writes" href="#l78">Line 90</a></h3>
+   <div class="inset_c">
+   Like line 86, InnoDB Buffer Pool Writes can been considered a measure of
+   InnoDB buffer pool throughput. This line lists the number and rate of
+   writes to the buffer pool. This value will probably be high if the server
+   does a lot of UPDATEs or INSERTs.
+   </div>
+
+   <h3>Flushes: <a name="idb_bp_report:flushes" href="#l78">Line 91</a></h3>
+   <div class="inset_c">
+   This line is simply the number of buffer pool page-flush requests.
+   </div>
+ 
+   <h3>Wait Free: <a name="idb_bp_report:wait_free" href="#l78">Line 92</a></h3>
+   <div class="inset_c">
+   Quoting from the MySQL manual regarding this status value:<br />
+   <div class="inset">
+   Normally, writes to the InnoDB buffer pool happen in the background. However,
+   if it is necessary to read or create a page and no clean pages are available, 
+   it is also necessary to wait for pages to be flushed first. This counter counts
+   instances of these waits. If the buffer pool size has been set properly, this 
+   value should be small.
+   </div>
+   </div>
+</div>
+
+   <h2>InnoDB Lock Report: <a name="idb_lock_report" href="#l94">Lines 94 - 100</a></h2>
+   <div class="inset_c">
+   InnoDB row lock status values were added in MySQL 5.0.3. MyISAM is a table-level
+   locking storage engine, but InnoDB is a row-level locking store engine. Therefore,
+   these values are important to consider when using the InnoDB engine.
+
+   <h3>Waits: <a name="idb_bp_report:waits" href="#l94">Line 95</a></h3>
+   <div class="inset_c">
+      This line shows "The number of times a row lock had to be waited for."
+      Zero is best.
+   </div>
+
+   <h3>Current: <a name="idb_bp_report:current" href="#l94">Line 96</a></h3>
+   <div class="inset_c">
+      This line shows "The number of row locks currently being waited for."
+      Zero is best.
+   </div>
+
+   <h3>Time acquiring: <a name="idb_bp_report:time" href="#l94">Lines 97 - 100</a></h3>
+   <div class="inset_c">
+      Lines 98, 99, and 100 show millisecond times corresponding to the Total number
+      of milliseconds that row locks had to wait (line 98), the Average wait time (99),
+      and the Maximum wait time (100). For all three metrics, zero is best.
+   </div>
+</div>
+
+   <h2>InnoDB Data, Pages, Rows Report: <a name="idb_dpr_report" href="#l102">Lines 102 - 121</a></h2>
+   <div class="inset_c">
+   The InnoDB Data, Pages, Rows Report is very general and, as such, is probably
+   only useful as general indicator of InnoDB engine throughput. The three sections,
+   Data, Pages, and Rows, give a very broad look into InnoDB's activity.
+   
+   <h3>Data: <a name="idb_bp_report:data" href="#l102">Lines 103 - 110</a></h3>
+   <div class="inset_c">
+   The first section, Data, lists four categories corresponding to InnoDB data:
+   Reads, Writes, fsync, Pending. The first category, Reads, refers to the total
+   number of data reads done by the InnoDB engine. This does not mean the total
+   number of data bytes read. It only means how many times InnoDB has read data;
+   it does not indicate what kind of data or how much data was read.<br /><br />
+
+   The second category, Writes, is just like Reads: it refers to the total number
+   of data writes done by InnoDB, but it does not indicate what kind of data or
+   how much data was written.<br /><br />
+
+   The third category, fsync, refers to the total number of file system syncs. In
+   other words: how many times InnoDB has saved data from RAM back to hard-disk.
+   This value will tend to be lower than Reads or Writes.<br /><br />
+
+   Pending, the final category, is further divided into 3 lines (lines 108, 109, 110):
+   Reads, Writes, fsync. Correspondingly, these lines refer to the current number
+   of Data Reads, Writes, and fsyncs that are pending (waiting). Zero is best.
+   </div>
+
+   <h3>Pages: <a name="idb_bp_report:pages" href="#l102">Lines 112 - 115</a></h3>
+   <div class="inset_c">
+   The Pages section has three categories: Created, Read, Written. Each category
+   is self-describing and all three refer to pages in the InnoDB buffer pool.
+   These values indicate the number and rate at which pages in the
+   buffer pool have been created, read, and written. However, none of the values
+   indicate what kind of pages. Therefore, these values are also only
+   useful as general indicators of InnoDB engine throughput.
+   </div>
+
+   <h3>Rows: <a name="idb_bp_report:rows" href="#l102">Lines 117 - 121</a></h3>
+   <div class="inset_c">
+   The final section, Rows, is last because it is the most general. Each of the
+   four categories in this section (Deleted, Inserted, Read, Updated) refer to
+   rows in InnoDB tables. Therefore, these values tend to be very large and, while
+   their counts (first column) may indicate little, their rates (second column)
+   are another indicator of InnoDB engine throughput.
+   </div>
+</div>
+
+   <h2>Conclusion</h2>
+   <div class="inset_c">
+   Now that we have read the entire mysqlreport report and considered it all, we can
+   make a general assessment of this example server.<br /><br />
+   In general, the server is running very well according to a number of big
+   indicators: key buffer usage is only at 12%, key ratios are good, DMS and QC
+   Hits account for over 99% of all questions, no weird Com_ problems, table
+   locks are good, table cache is only at 10% usage, and relatively low and
+   slow number of connections.<br /><br />
+   Concerning the InnoDB engine, it appears to be in use, but not heavily. As
+   best as the InnoDB status values can inform us, nothing is out of the ordinary
+   in this case.<br /><br />
+   Things we could work on include, first and foremost, the query cache because
+   it is too volatile, and secondly we must set thread_cache_size higher until the
+   thread cache hit rate comes back up.<br /><br />
+   That is all there is too it. If you have further questions you can
+   <a href="http://hackmysql.com/contact">contact</a> me. And, if you did not notice, there
+   are a number of other example mysqlreport reports on the
+   <a href="http://hackmysql.com/mysqlreport">mysqlreport web page</a>.
+   Although the example reports are from varying older versions of mysqlreport,
+   the format is still similar.<br /><br />
+</div>
+This guide was last updated on April 16, 2008 for mysqlreport v3.5.
+</div>
+</body>
+</html>
