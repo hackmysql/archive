@@ -1,0 +1,1004 @@
+#!/usr/bin/perl -w
+
+# mysqlidxchk v1.1 DEBUG Nov 11 2007
+# http://hackmysql.com/mysqlidxchk
+
+# mysqlidxchk (MySQL Index Checker) checks tables for unused indexes. 
+# Copyright 2007 Daniel Nichter
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# The GNU General Public License is available at:
+# http://www.gnu.org/copyleft/gpl.html
+
+use strict;
+use DBI;
+use Getopt::Long;
+eval { require Term::ReadKey; };
+my $RK = ($@ ? 0 : 1);
+
+my $WIN = ($^O eq 'MSWin32' ? 1 : 0);
+my %op;
+my %mycnf; # ~/.my.cnf
+my ($dbh, $query);
+my %q_h;
+my ($stmt, $q);
+my $total_queries;
+my $dsn;
+my ($major, $minor, $patch); # Set in get_MySQL_version()
+my %db_schema;
+my %valid_dbs;
+
+GetOptions(
+   \%op,
+   "user=s",
+   "password:s",
+   "host=s",
+   "port=s",
+   "socket=s",
+   "no-mycnf",
+   "help|?",
+   "general|g=s",
+   "slow|s=s",
+   "raw|r=s",
+   "grep=s",
+   "debug",
+   "D|sod|show-only-databases=s",
+   "sad|show-all-databases",
+   "sui|show-used-indexes",
+   "iu|ignore-update",
+   "nd|no-discovery",
+   "dr|discovery-report"
+);
+
+if((!$op{general} && !$op{slow} && !$op{raw}) || $op{help})
+{
+   show_help_and_exit();
+}
+
+get_user_mycnf() unless $op{'no-mycnf'};
+
+# Command line options override ~/.my.cnf
+$mycnf{host}   = $op{host}   if $op{host};
+$mycnf{port}   = $op{port}   if $op{port};
+$mycnf{socket} = $op{socket} if $op{socket};
+$mycnf{user}   = $op{user}   if $op{user};
+
+$mycnf{user} ||= $ENV{USER};
+
+if(exists $op{password})
+{
+   if($op{password} eq '') # Prompt for password
+   {
+      Term::ReadKey::ReadMode(2) if $RK;
+      print "Password for database user $mycnf{user}: ";
+      chomp($mycnf{pass} = <STDIN>);
+      Term::ReadKey::ReadMode(0), print "\n" if $RK;
+   }
+   else { $mycnf{pass} = $op{password}; } # Use password given on command line
+}
+
+# Connect to MySQL
+if($mycnf{'socket'} && -S $mycnf{'socket'})
+{
+   $dsn = "DBI:mysql:mysql_socket=$mycnf{socket}";
+}
+elsif($mycnf{'host'})
+{
+   $dsn = "DBI:mysql:host=$mycnf{host}" . ($mycnf{port} ? ";port=$mycnf{port}" : "");
+}
+else
+{
+   $dsn = "DBI:mysql:host=localhost";
+}
+
+if($op{debug})
+{
+   print "DBI DSN: $dsn\n";
+}
+
+$dbh = DBI->connect($dsn, $mycnf{'user'}, $mycnf{'pass'}, { PrintError => 0 });
+
+if($DBI::err)
+{
+   print "Cannot connect to MySQL.\n";
+   print "MySQL error message: $DBI::errstr\n";
+   exit;
+}
+
+# Build %q_h from log files
+parse_logs();
+
+# Count and print total number of queries read/saved from log files
+$total_queries = 0;
+for(keys %q_h) { $total_queries += $q_h{$_}->{c}; }
+print "$total_queries total valid queries, " , scalar keys %q_h , " unique.\n";
+exit if !$total_queries;
+
+if($op{D})
+{
+   print "Showing only databases: ";
+   for(split ',', $op{D})
+   {
+      print "$_ ";
+      $valid_dbs{$_} = 1;
+   }
+   print "\n";
+}
+
+print "grep pattern: \'$op{grep}\'\n\n" if $op{grep};
+
+# Not needed until discover_schema_IS() is implemented
+# get_MySQL_version(); # Sets global $major, $minor, $patch
+
+# A future version will use discover_schema_IS() if possible
+discover_schema_SHOW();
+
+# For each query in $q_h, if it has a db, check that the db actually
+# exists. If it doesn't have a db, try to discover the db. Otherwise,
+# set db = 0 and do not EXPLAIN the query.
+check_db_usage();
+
+# Check if any queries are left which have known databases
+$total_queries = 0; # reuse
+for(keys %q_h) { $total_queries = 1, last if $q_h{$_}->{db}; }
+if(!$total_queries)
+{
+   print "\nNo queries have known or valid databases. Therefore, there are no queries which can be EXPLAINed.\n\n";
+   exit;
+}
+
+# Remove databases which aren't used by any of the queries
+if(!$op{sad})
+{
+   my %used_dbs;
+
+   for(keys %q_h) { $used_dbs{$q_h{$_}->{db}} = 0; }
+   for(keys %db_schema) { delete $db_schema{$_} if !exists $used_dbs{$_}; }
+}
+
+# EXPLAIN all queries in %q_h (which have a db), marking used and unused
+# indexes for each in %db_schema
+EXPLAIN_queries();
+
+remove_used_indexes() unless $op{sui};
+
+print_idx_usage_report();
+
+exit;
+
+
+#
+# Subroutines
+#
+
+sub show_help_and_exit
+{
+   print <<"HELP";
+mysqlidxchk v1.1 DEBUG Nov 11 2007
+mysqlidxchk (MySQL Index Checker) checks tables for unused indexes.
+
+Command line options (abbreviations work):
+   --user USER      Connect to MySQL as USER
+   --password PASS  Use PASS or prompt for MySQL user's password
+   --host ADDRESS   Connect to MySQL at ADDRESS
+   --port PORT      Connect to MySQL at PORT
+   --socket SOCKET  Connect to MySQL at SOCKET
+   --no-mycnf       Don't read ~/.my.cnf
+   --help           Prints this
+   --debug          Print debugging information
+   
+   --general LOG    Read queries from general LOG | Multiple logs can be 
+   --slow LOG       Read queries from slow LOG    | can be given like
+   --raw LOG        Read queries from LOG         | file1,file2,file3,...
+
+   --discovery-report  Print database discovery report
+   --grep P            grep for statements that match Perl regex pattern P
+   --ignore-update     Ignore UPDATE statements
+   --no-discovery      Do not attempt database discovery
+   --show-all-databases     Show all databases
+   --show-only-databases D  Show only databases D (comma-separated list)
+   --show-used-indexes      Show used indexes
+
+Visit http://hackmysql.com/mysqlidxchk for a lot more information.
+HELP
+
+   exit;
+}
+
+sub get_user_mycnf
+{
+
+   return if $WIN;
+   open MYCNF, "$ENV{HOME}/.my.cnf" or return;
+   while(<MYCNF>)
+   {
+      if(/^(.+?)\s*=\s*"?(.+?)"?\s*$/)
+      {
+         $mycnf{$1} = $2;
+         print "get_user_mycnf: read '$1 = $2'\n" if $op{debug};
+      }
+   }
+   $mycnf{'pass'} ||= $mycnf{'password'} if exists $mycnf{'password'};
+   close MYCNF;
+}
+
+sub parse_logs 
+{
+   my @l;
+
+   if($op{general}) { @l = split ',', $op{general}; parse_general_logs(@l); }
+   if($op{slow})    { @l = split ',', $op{slow};    parse_slow_logs(@l);    }
+   if($op{raw})     { @l = split ',', $op{raw};     parse_raw_logs(@l);     }
+}
+
+sub parse_general_logs
+{
+   my @logs = @_;
+   my $valid_stmt;
+   my $have_stmt;
+   my $match;
+   my %use_db;
+   my $cid;
+
+   $use_db{0} = '';
+
+   for(@logs)
+   {
+      open LOG, "< $_" or warn "Couldn't open general log '$_': $!\n" and next;
+      print "Reading general log '$_'.\n";
+
+      $have_stmt  = 0;
+      $valid_stmt = 0;
+      $cid        = 0;
+
+      while(<LOG>)
+      {
+         next if /^$/;
+
+         if(!$have_stmt)
+         {
+            next unless /^[\s\d:]+(Query|Execute|Connect|Init)/;
+
+            if(/^\s+(\d+) (Query|Execute|Connect|Init)/)
+            {
+            }
+            elsif(/^\d{6}\s+[\d:]+\s+(\d+) (Query|Execute|Connect|Init)/)
+            {
+            }
+            else
+            {
+               d("parse_general_logs: FALSE-POSITIVE MATCH: $_");
+               next;
+            }
+
+            $cid = $1;
+            $use_db{$cid} = 0 unless exists $use_db{$cid};
+
+            d("parse_general_logs: cid = $cid, cmd = $2"); # D
+
+            if($2 eq "Connect")
+            {
+               /Connect\s+.+ on (\w*)/;
+               if($1 ne "")
+               {
+                  $use_db{$cid} = $1;
+                  d("parse_general_logs: Connect w/ db = $1"); # D
+               }
+               else { d("parse_general_logs: cid = $cid, Connect w/ no db"); } # D
+               next;
+            }
+
+            if($2 eq "Init")
+            {
+               /Init DB\s+(\w+)/;
+               $use_db{$cid} = $1;
+               d("parse_general_logs: cid = $cid, Init db = $1"); # D
+               next;
+            }
+
+            $have_stmt = 1;
+
+            if($2 eq "Query")      { /Query\s+(.+)/;             $match = $1; }
+            elsif($2 eq "Execute") { /Execute\s+\[\d+\]\s+(.+)/; $match = $1; }
+
+            $stmt = $match . "\n";
+            $stmt =~ /^(\w+)/;
+
+            if(can_EXPLAIN($1)) { $valid_stmt = 1; }
+            else { $valid_stmt = 0; }
+
+            d("parse_general_logs: h = $have_stmt, v = $valid_stmt, cid = $cid, db = $use_db{$cid}, matched '$stmt'"); # D
+         }
+         else
+         {
+            if(/^[\s\d:]+\d [A-Z]/)  # New CMD so the stmt we have now is done
+            {
+               d("parse_general_logs: h = $have_stmt, v = $valid_stmt, NEW stmt"); # D
+
+               $have_stmt = 0;
+
+               if($valid_stmt)
+               {
+                  if($op{grep} && ($stmt !~ /$op{grep}/io)) { $valid_stmt = 0; }
+
+                  if($valid_stmt)
+                  {
+                     abstract_stmt(); # Sets $q to abstracted form of $stmt
+
+                     my $x = $q_h{$q} ||= { sample => $stmt };
+                     $x->{c} += 1;
+                     $x->{db} = $use_db{$cid} if $x->{c} == 1;
+
+                     d("parse_general_logs: c = $x->{c}, cid = $cid, db = $x->{db}, SAVED previous stmt '$stmt'"); # D
+                  }
+               }
+               else { d("parse_general_logs: v = $valid_stmt, previous stmt INVALID (fails filter or grep)"); } # D
+
+               redo; # Re-read the new CMD; it may be another Query
+            }
+            else { $stmt .= $_ unless !$valid_stmt; }
+        }
+      }
+      close LOG;
+   }
+}
+
+sub parse_slow_logs
+{
+   my @logs = @_;
+   my $valid_stmt;
+   my $n_stmts;
+   my $use_db;
+
+   $valid_stmt = 0;
+
+   for(@logs)
+   {
+      open LOG, "< $_" or warn "Couldn't open slow log '$_': $!\n" and next;
+      print "Reading slow log '$_'.\n";
+
+      while(<LOG>)
+      {
+         last if !defined $_;
+         next until /^# User/;
+
+         d("parse_slow_logs: v = $valid_stmt, read User '$_'"); # D
+
+         $_ = <LOG>; # Read next line
+
+         d("parse_slow_logs: v = $valid_stmt, read Query_time '$_'"); # D
+
+         $stmt = '';
+
+         while(<LOG>)
+         {
+            last if /^#/;
+            last if /^\//;
+            next if /^$/;
+
+            $stmt .= $_;
+         }
+
+         chomp $stmt;
+
+         $valid_stmt = 0;
+         $use_db = 0;
+
+         d("parse_slow_logs: v = $valid_stmt, read stmt '$stmt'"); # D
+
+         # Check for compound statements
+         $n_stmts = 1;
+         $n_stmts++ while $stmt =~ /;\n/g;
+
+         if($n_stmts > 1)
+         {
+            d("parse_slow_logs: v = $valid_stmt, compound stmt"); # D
+
+            my @s = split(/;\n/, $stmt);
+            my $grep_matches = 0;
+
+            for(@s)
+            {
+               $_ .= ";\n" if $_ !~ /;\s*$/; # Put ; back that split removed
+
+               /^\s*(\w+)/;
+               $q = $1;
+
+               if(lc($1) eq "use")
+               {
+                  /use (\w+)/i;
+                  $use_db = $1;
+                  $_ = '';
+               }
+               else
+               {
+                  if($op{grep} && ($_ =~ /$op{grep}/io)) { $grep_matches = 1; }
+                  if(!can_EXPLAIN($q)) { $_ = ''; }
+               }
+            }
+
+            if(!$op{grep} || ($op{grep} && $grep_matches))
+            {
+               $stmt = join '', @s;
+               $valid_stmt = 1 if $stmt ne '';
+            }
+         }
+         else
+         {
+            $valid_stmt = 1;
+
+            $stmt =~ /^\s*(\w+)/;
+            $q = $1;
+
+            if($op{grep} && ($stmt !~ /$op{grep}/io)) { $valid_stmt = 0; }
+            if(!can_EXPLAIN($q)) { $valid_stmt = 0; }
+         }
+
+         if($valid_stmt)
+         {
+            abstract_stmt(); # Sets $q to abstracted form of $stmt
+
+            my $x = $q_h{$q} ||= { sample => $stmt };
+            $x->{c}  += 1;
+            $x->{db} = $use_db if $x->{c} == 1;
+
+            d("parse_slow_logs: c = $x->{c}, db = $x->{db}, SAVED stmt '$stmt'"); # D
+         }
+         else { d("parse_slow_logs: v = $valid_stmt, INVALID stmt (fails filter or grep)"); } # D
+
+         redo;
+      }
+      close LOG;
+   }
+}
+
+sub parse_raw_logs
+{
+   my @logs = @_;
+   my $valid_stmt;
+   my $use_db;
+
+   $/ = ";\n";
+
+   for(@logs)
+   {
+      open LOG, "< $_" or warn "Could not open raw log '$_': $!\n" and next;
+      print "Reading raw log '$_'.\n";
+
+      $use_db = 0;
+
+      while(<LOG>)
+      {
+         s/^\n//;   # Remove leading \n
+         chomp;     # Remove trailing \n
+         $_ .= ';'; # Put ; back
+
+         d("parse_raw_logs: read stmt '$_'"); # D
+
+         $valid_stmt = 1;
+         /^\s*(\w+)/;
+         $q = $1;
+
+         if(lc($q) eq "use")
+         {
+            /use (\w+)/i;
+            $use_db = $1;
+            next;
+         }
+         else
+         {
+            if($op{grep} && (! /$op{grep}/io)) { $valid_stmt = 0; }
+            if(!can_EXPLAIN($q)) { $valid_stmt = 0; }
+         }
+
+         if($valid_stmt)
+         {
+            $stmt = $_;
+
+            abstract_stmt(); # Sets $q to abstracted form of $stmt
+
+            my $x = $q_h{$q} ||= { sample => $stmt };
+            $x->{c} += 1;
+            $x->{db} = $use_db if $x->{c} == 1;
+
+            d("parse_raw_logs: c = $x->{c}, db = $x->{db}, SAVED stmt '$stmt'"); # D
+         }
+         else { d("parse_raw_logs: INVALID stmt (fails filter or grep)"); } # D
+      }
+      close LOG;
+   }
+}
+
+sub abstract_stmt
+{
+   $q = lc $stmt;
+
+   # --- Regex copied from mysqldumpslow
+   $q =~ s/\b\d+\b/N/g;
+   $q =~ s/\b0x[0-9A-Fa-f]+\b/N/g;
+   $q =~ s/''/'S'/g;
+   $q =~ s/""/"S"/g;
+   $q =~ s/(\\')//g;
+   $q =~ s/(\\")//g;
+   $q =~ s/'[^']+'/'S'/g;
+   $q =~ s/"[^"]+"/"S"/g;
+   # ---
+
+   $q =~ s/^\s+//g;
+   $q =~ s/\s{2,}/ /g;
+   $q =~ s/\n/ /g;
+   $q =~ s/; (\w+) /;\n$1 /g; # \n between compound statements
+
+   # Normalize IN ()
+   while($q =~ /( IN\s*\((?![NS]{1}\d+)(.+?)\))/i)
+   {
+      my $in = $2;
+      my $N = ($in =~ tr/N//);
+
+      if($N) { $q =~ s/ IN\s*\((?!N\d+)(.+?)\)/ IN (N$N)/i; } # IN (N, N) --> IN (N2)
+      else {
+         $N = ($in =~ tr/S//) ;
+         $q =~ s/ IN\s*\((?!S\d+)(.+?)\)/ IN (S$N)/i;         # IN ('S', 'S') --> IN (S2)
+      }
+   }
+}
+
+sub EXPLAIN_queries
+{
+   my $row;
+   my @keys;
+   my $x;
+   my $last_db;
+
+   $last_db = 0;
+
+   for(keys %q_h)
+   {
+      $x = $q_h{$_};
+
+      next if !$x->{db};
+
+      $stmt = $x->{sample};
+
+      @keys = ();
+
+      if($stmt =~ /^UPDATE /i)
+      {
+         if(!$op{iu}) { $stmt = UPDATE_to_SELECT($stmt); }
+      }
+   
+      d("EXPLAIN_queries: EXPLAIN '$stmt' using db '$x->{db}'");
+
+      $dbh->do("USE $x->{db};");
+      $last_db = $x->{db};
+
+      $query = $dbh->prepare("EXPLAIN $stmt");
+
+      $query->execute();
+
+      if($DBI::err)
+      {
+         chomp($stmt);
+         print "\nCannot EXPLAIN '$stmt'.\n";
+         print "MySQL error message: $DBI::errstr\n";
+      }
+      else
+      {
+         while($row = $query->fetchrow_hashref())
+         {
+            $row->{key} = 0 if !$row->{key};
+
+            # The following may happen for queries like "SELECT COUNT(*) FROM table;"
+            next if !$row->{table};
+
+            d("EXPLAIN_queries: result tbl = $row->{table}, key = $row->{key}");
+
+            mark_idx_used($last_db, $row->{table}, $row->{key}, $stmt, $_) if $row->{key};
+         }
+      }
+   }
+}
+
+# debug
+sub d
+{
+   return unless $op{debug};
+
+   my $debug_msg = shift;
+
+   $debug_msg =~ s/\n\'$/'/;
+
+   print "$debug_msg\n";
+}
+
+sub can_EXPLAIN
+{
+   my $e = shift;
+
+   if(lc($e) eq "select") { return 1; }
+   if(lc($e) eq "update" && !$op{iu}) { return 1; }
+
+   return 0;
+}
+
+sub get_MySQL_version
+{
+   my @row;
+
+   @row = query_simple_list("SHOW VARIABLES LIKE 'version';");
+
+   ($major, $minor, $patch) = ($row[1] =~ /(\d{1,2})\.(\d{1,2})\.(\d{1,2})/);
+}
+
+sub discover_schema_IS
+{
+   # TODO for a future version
+   return;
+}
+
+sub discover_schema_SHOW
+{
+   my @rows;
+
+   @rows = query_simple_list("SHOW DATABASES;");
+
+   for(@rows)
+   {
+      if($op{D}) { $db_schema{$_} = {} if exists $valid_dbs{$_}; }
+      else { $db_schema{$_} = {}; }
+   }
+
+   for my $db (keys %db_schema)
+   {
+      $dbh->do("USE $db;");
+
+      @rows = query_simple_list("SHOW TABLES;");
+
+      %{$db_schema{$db}} = map { $_, {} } @rows;
+
+      for my $table (keys %{$db_schema{$db}})
+      {
+         my $row;
+         @rows = ();
+
+         $query = $dbh->prepare("SHOW INDEX FROM $table;");
+         $query->execute();
+
+         while($row = $query->fetchrow_hashref()) { push @rows, $row->{Key_name}; }
+
+         %{$db_schema{$db}->{$table}} = map { $_, 0 } @rows;
+      }
+   }
+}
+
+sub query_simple_list
+{
+   my $q = shift;
+   my @rows;
+
+   $query = $dbh->prepare($q);
+   $query->execute();
+   while(@_ = $query->fetchrow_array()) { push @rows, @_; }
+
+   return @rows;
+}
+
+sub mark_idx_used
+{
+   my $db = shift;
+   my $table = shift;
+   my $key = shift;
+   my $stmt = shift;
+   my $q_h_key = shift;
+
+   # $stmt is the actual query that was EXPLAINed. However, since the query
+   # might be an UPDATE converted into a SELECT, $q_h_key is the original
+   # query and key in %q_h for the actual query.
+   # For example:
+   #    actual query = "SELECT * FROM foo WHERE bar = 1;"
+   #    original query = "UPDATE foo SET col = 2 WHERE bar = 1;"
+
+   return if !$key;
+
+   if(exists $db_schema{$db}->{$table})
+   {
+      $db_schema{$db}->{$table}->{$key} += 1;
+   }
+   else
+   {
+      if(!exists $q_h{$q_h_key}->{tbl_alias}->{$table})
+      {
+         my %ta;
+
+         %ta = parse_table_aliases(get_table_ref($stmt));
+
+         for(keys %ta)
+         { 
+            $q_h{$q_h_key}->{tbl_alias}->{$_} = $ta{$_};
+         }
+      }
+
+      my $real_table_name = $q_h{$q_h_key}->{tbl_alias}->{$table};
+
+      $db_schema{$db}->{$real_table_name}->{$key} += 1;
+   }
+}
+
+sub parse_table_aliases
+{
+   my $table_ref = shift;
+   my %table_aliases;
+   my @tables;
+
+   $table_ref =~ s/\n/ /g;
+   $table_ref =~ s/`//g; # Graves break database discovery
+
+   d("parse_table_aliases: table ref = '$table_ref'");
+
+   if($table_ref =~ / (:?straight_)?join /i)
+   {
+      $table_ref =~ s/ join /,/ig;
+      while($table_ref =~ s/ (?:inner|outer|cross|left|right|natural),/,/ig) { }
+      $table_ref =~ s/ using \(.+?\)//ig;
+      $table_ref =~ s/ on \([\w\s=.,]+\),?/,/ig;
+      $table_ref =~ s/ on [\w\s=.]+,?/,/ig;
+      $table_ref =~ s/ straight_join /,/ig;
+   }
+
+   @tables = split /,/, $table_ref;
+
+   for(@tables)
+   {
+      if(/\s*(\w+)\s+AS\s+(\w+)\s*/i)
+      {
+         $table_aliases{$2} = $1;
+      }
+      elsif(/^\s*(\w+)\s+(\w+)\s*$/)
+      {
+         $table_aliases{$2} = $1;
+      }
+      elsif(/^\s*(\w+)+\s*$/)
+      {
+         # Not an alias but we parse/save it anyway to be polite
+         $table_aliases{$1} = $1;
+      }
+   }
+
+   if($op{debug})
+   {
+      for(keys %table_aliases)
+      {
+         print "parse_table_aliases: '$_' is really '$table_aliases{$_}'\n";
+      }
+   }
+
+   return %table_aliases;
+}
+
+sub hk_sort
+{
+   my $h_ref = shift;
+   my @hk_sorted;
+
+   @hk_sorted = sort { $a cmp $b } keys %$h_ref;
+
+   return @hk_sorted;
+}
+
+sub remove_used_indexes
+{
+   for my $db (keys %db_schema)
+   {
+      for my $table (keys %{$db_schema{$db}})
+      {
+         for my $idx (keys %{$db_schema{$db}->{$table}})
+         {
+            my $n = $db_schema{$db}->{$table}->{$idx};
+
+            if($n) { delete $db_schema{$db}->{$table}->{$idx}; }
+         }
+
+         if(!scalar keys %{$db_schema{$db}->{$table}}) { delete $db_schema{$db}->{$table}; }
+      }
+
+      if(!scalar keys %{$db_schema{$db}}) { delete $db_schema{$db}; }
+   }
+}
+
+sub UPDATE_to_SELECT
+{
+   my $u = shift;
+
+   d("UPDATE_to_SELECT: before '$u'");
+
+   $u =~ s/^\s*update (?:low_priority| |ignore)?\s*([\w.\s,]+) set .+? where /select * from $1 where /i;
+
+   d("UPDATE_to_SELECT: after '$u'");
+
+   return $u;
+}         
+
+sub check_db_usage
+{
+   my $x;
+
+   for(keys %q_h)
+   {
+      $x = $q_h{$_};
+
+      if(!$x->{db} && !$op{nd})
+      {
+         $x->{db} = discover_database($x->{sample}, $_);
+
+         if($x->{db})
+         {
+            print "Database discovery: query '$_' uses database '$x->{db}'.\n" if $op{dr};
+         }
+         else
+         {
+            print "Database discovery: cannot discover database for query '$_'.\n" if $op{dr};
+            delete $q_h{$_};
+            next;
+         }
+      }
+
+      # Remove queries that don't meet --show-databases
+      if($op{D})
+      {
+         if(!exists $valid_dbs{$x->{db}})
+         {
+            # If one query using db x needs to be deleted because
+            # db x is not in %valid_dbs, then we immediately delete
+            # all queries using db x
+            for my $uses_invalid_db (keys %q_h)
+            {
+               delete $q_h{$uses_invalid_db} if $q_h{$uses_invalid_db}->{db} eq $x->{db};
+               d("check_db_usage: REMOVED query '$_' database $x->{db}: fails -D") if $op{debug};
+            }
+
+            next;
+         }
+      }
+
+      # Remove queries that use dbs which aren't in the discovered schema
+      if(!exists $db_schema{$x->{db}})
+      {
+         for my $uses_invalid_db (keys %q_h)
+         {
+            delete $q_h{$uses_invalid_db} if $q_h{$uses_invalid_db}->{db} eq $x->{db};
+            d("check_db_usage: REMOVED query '$_' database $x->{db}: db doesn't exist in schema") if $op{debug};
+         }
+      }
+   }
+}
+
+sub discover_database
+{
+   my $q = shift;
+   my $q_h_key = shift;
+   my %tables;
+   my $all_tables_found;
+
+   if($q =~ /^UPDATE /i)
+   {
+      if(!$op{iu})
+      {
+         $q = UPDATE_to_SELECT($q);
+      }
+      else
+      {
+         print "Ignoring UPDATE.\n";
+         return 0;
+      }
+   }
+                           
+   %tables = parse_table_aliases(get_table_ref($q));
+
+   for my $db (keys %db_schema)
+   {
+      $all_tables_found = 0;
+
+      for(keys %tables)
+      {
+         if(!exists $db_schema{$db}->{$tables{$_}})
+         {
+            $all_tables_found = 0;
+            last;
+         }
+         else { $all_tables_found = 1; }
+         
+      }
+
+      if($all_tables_found)
+      {
+         for(keys %tables)
+         {
+            if($_ ne $tables{$_}) { $q_h{$q_h_key}->{tbl_alias}->{$_} = $tables{$_}; }
+         }
+
+         return $db;
+      }
+   }
+
+   return 0;
+}
+
+sub get_table_ref
+{
+   my $q = shift;
+   my $table_ref;
+
+   $table_ref = 0;
+
+   if($q =~ /from\s+(.+?)(?:where|order|limit|having)+.+/is) 
+   {
+      $table_ref = $1;
+   }
+   elsif($q =~ /from\s+(.+?)$/is)
+   {
+      # This handles queries like "SELECT COUNT(id) FROM table;"
+      chomp($table_ref = $1);
+   }
+
+   return $table_ref;
+}
+
+sub print_idx_usage_report
+{
+   # The formats reuse global $q and $stmt
+
+   print "\n";
+
+   for my $db (hk_sort(\%db_schema))
+   {
+      $q = $db;
+      $~ = 'IDX_USAGE_DB', write;
+
+      for my $table (hk_sort(\%{$db_schema{$db}}))
+      {
+         $q = $table;
+         $~ = 'IDX_USAGE_TABLE', write;
+
+         for my $idx (hk_sort(\%{$db_schema{$db}->{$table}}))
+         {
+            my $n = $db_schema{$db}->{$table}->{$idx};
+
+            if($n) { $stmt = "used ($n)\n" }
+            else   { $stmt = "NOT used\n"; }
+
+            $q = $idx;
+            $~ = 'IDX_USAGE_IDX', write;
+         }
+      }
+   }
+
+   print "\n";
+}
+
+#
+# Formats
+#
+
+format IDX_USAGE_DB =
+Database: @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$q
+.
+
+format IDX_USAGE_TABLE =
+        Table: @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$q
+.
+
+format IDX_USAGE_IDX =
+                Index: @<<<<<<<<<<<<<<<<<<< @<<<<<<<<<<
+$q, $stmt
+.
