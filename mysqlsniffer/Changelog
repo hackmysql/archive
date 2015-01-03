@@ -1,0 +1,19 @@
+http://hackmysql.com/mysqlsniffer
+
+mysqlsniffer change log
+v1.2 Aug 18 2006 UNSTABLE
+- Added support for 4.0 servers via --v40 command line option
+
+v1.1 Oct 28 2005
+- Mostly support binary protocol (numeric, string, and date/time/datetime column types)
+- Mostly support prepared statements (COM_STMT_PREPARE, COM_STMT_EXECUTE,
+  and COM_STMT_CLOSE)
+- Added command line options (instead of #defines in mysqlsniffer.h)
+- Support 0xFE length code (8 bytes)
+- Fixed bug in program cleanup (was using tag-> instead of tag[i].)
+- Support SIGHUP to reset connection tracking
+- Fixed some minor bugs
+- Code cleanup 
+
+v1.0 Oct 5 2005
+- Release
