@@ -3035,7 +3035,7 @@ sub standard_report
          }
 
          # Print all values for this format line.
-         if(!$format_conditional || $value_resolved)
+         if(!$format_conditional && $value_resolved)
          {
             $values[$#values] =~ s/[\s\n]{1,}$//;  # remove trailing spaces and newlines from final value
             printf($$formats[$i], @values);
