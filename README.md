@@ -1,7 +1,7 @@
 Hack MySQL
 ==========
 
-This repo contains _retired_ tools from [Hack MySQL](https://https://hackmysql.com). These tool are not supported and no longer developed. Instead, check out:
+This repo contains _retired_ tools from [Hack MySQL](https://hackmysql.com). These tool are not supported and no longer developed. Instead, check out:
 
 * [Percona Toolkit](https://www.percona.com/software/database-tools/percona-toolkit)
 * [Percona Monitoring & Management](https://www.percona.com/software/database-tools/percona-monitoring-and-management)
